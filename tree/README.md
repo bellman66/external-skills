@@ -1,142 +1,253 @@
 # tree
 
-`grill-me` 의 인터뷰 프로세스를 Claude Code mod 로 빼낸 것. 스킬은 그대로 두고 별개로 동작한다.
+A decision-tree interview for Claude Code, in a pane.
 
-스킬판이 가진 세 가지 비용 — 초기에 맥락을 통째로 정비해야 하고, 불필요한 맥락이 섞여 들어오고,
-한 번 묻고 기다리는 동기 루프라 느리다 — 를 줄이는 것이 목적이다.
+[English](README.md) · [한국어](README.ko.md)
 
-| | grill-me (스킬) | tree (mod) |
-| :- | :- | :- |
-| 트리 생성 | 요구문 정독 후 통째로 | 초기 프롬프트 한 줄을 인양해 세움 |
-| 질문 | `AskUserQuestion` 라운드, 턴을 소비 | pane 안에서 노드를 눌러 선택지 확인 |
-| 답변 | 프롬프트에 타이핑, 턴을 소비 | 선택지 클릭 또는 노드마다 있는 직접 쓰기 |
-| 진행 상태 | 매 라운드 텍스트 존 맵 | 노드마다 신호등 |
-| 트리 갱신 | 메인 Claude 가 재계산 | `$.model.fork` — 메인 턴을 쓰지 않음 |
+![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-black)
+![Requires 2.1.287+](https://img.shields.io/badge/requires-2.1.287%2B-blue)
+![Terminal and Desktop](https://img.shields.io/badge/surface-terminal%20%7C%20desktop-lightgrey)
+![44 tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)
 
-## 쓰는 법
+- [Why tree](#why-tree)
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+- [Using the pane](#using-the-pane)
+- [The traffic light](#the-traffic-light)
+- [Context and criteria](#context-and-criteria)
+- [What it hands over](#what-it-hands-over)
+- [What it costs](#what-it-costs)
+- [Language](#language)
+- [State](#state)
+- [Development](#development)
+- [Limits](#limits)
+- [License](#license)
+
+## Why tree
+
+Before Claude writes anything, the two of you have to agree on what is being
+built. That agreement is a tree of decisions, and most of it is not in your
+prompt — it is in the branches neither of you has thought to raise yet.
+
+Interviewing for it in chat costs three things:
+
+- **A long opening.** You have to assemble the whole context before the first
+  question lands.
+- **Drift.** Extra context comes along for the ride; the context that matters
+  arrives late.
+- **Waiting.** Ask, answer, re-plan, ask again — one decision per round trip.
+
+tree moves that interview into a pane. Questions arrive a **layer** at a time,
+you answer them by pressing numbers, and the model is called once per layer
+instead of once per question.
+
+## How it works
+
+A layer is the set of decisions whose prerequisites are all settled — every
+question that can be asked right now. Decisions inside one layer never depend
+on each other, so they can be laid out together and answered in any order.
+
+```
+/tree <one line about what to decide>
+   │
+   ├─ one model call ─────────────► layer 1
+   │
+   ▼
+┌─────────────────────────────────────────────┐
+│ ▸ ● storage                    → SQLite     │  pick with number keys
+│ ▾ ● retention                               │  nothing is sent yet
+│   ╭────────────────────────────────────╮    │
+│   │ how long do we keep it?            │    │
+│   │ why asked · lifecycle gap          │    │
+│   │              ✓ 90 days   ★pick     │    │
+│   │              2 forever             │    │
+│   ╰────────────────────────────────────╯    │
+│ ▸ ● access                                  │
+└─────────────────────────────────────────────┘
+   │
+   ├─ [ Next step ] ─ one model call ────────► layer 2
+   │                   · answers settle
+   │                   · unanswered ones are held, not lost
+   │                   · contradicted decisions reopen
+   │                   · decisions whose premise died are dropped
+   ▼
+  … until nothing is left to ask
+   │
+   └─ [ Hand to Claude ] ──────────────────► a work order
+```
+
+The reply is a delta — the next layer plus the ids to reopen or strike out —
+not a rewrite of the whole tree.
+
+## Getting started
 
 ```bash
-claude --plugin-dir ./tree
+git clone https://github.com/bellman66/external-skills
+claude --plugin-dir ./external-skills/tree
 ```
 
-세션에서:
+Then, in the session:
 
 ```
-/tree 결제 연동을 붙이고 싶다
+/tree add a payments integration
 ```
 
-인자를 생략하면 직전에 보낸 프롬프트를 씨앗으로 쓴다. pane 이 열리고 **첫 레이어**가 선다.
+Leave the argument off and it takes your last prompt as the seed.
 
-한 레이어 = 선행 결정이 모두 해소되어 지금 당장 물을 수 있는 결정들의 집합. 같은 레이어의 결정끼리는
-서로의 답에 의존하지 않으므로, 한 화면에 통째로 펼쳐두고 한꺼번에 고른다.
+To keep it around, add the directory as a marketplace and install it as a
+plugin, the same as any other Claude Code plugin.
 
-질문들은 **제목만 한 줄씩** 깔리고 그중 하나만 펼쳐진다. 제목을 누르면 그게 열리고 앞의 것은 접힌다.
-펼쳐진 질문의 선택지 옆 **번호가 곧 단축키**다 — `1` 을 누르면 1번이 선택된다. 고른 것은 초록 `✓`,
-추천안은 노란 `★추천` 으로 표시된다.
+## Using the pane
 
-상단 줄은 보는 방식만 바꾸고, 진행 버튼은 선택지 바로 아래에 있다 — 마지막으로 고른 자리에서 손이 움직이지 않는다.
+Questions are listed one title per line, and one of them is open. Press a
+title to open it; the one before it folds. **The numbers beside the choices
+are the keys** — press `1` to take the first choice. The recommendation is
+marked `★pick`, and what you picked turns a green `✓`.
 
-- **전체 펼치기** `a` — 이 단계의 모든 질문을 한꺼번에 펼친다. 다시 누르면 하나씩으로 돌아간다
-  (전체를 펼치면 번호가 겹치므로 그동안 번호 단축키는 꺼진다)
-- **추천으로 모두 선택** `p` — 자동 항법. 아직 안 고른 질문을 전부 추천안으로 채운다. 켜두면 **다음 단계가 열릴 때마다** 자동으로 채우므로, 다음 단계로만 누르면 끝까지 간다. 손으로 고른 답은 덮어쓰지 않는다
-- **선택지**를 누르거나 선택지 아래 **입력칸**에 적고 Enter — 고른 답은 초안으로만 쌓인다. **모델은 아직 안 부른다**
-- **다음 단계로** `s` — 그 단계가 통째로 확정되고, **한 번의 호출**로 다음 단계가 열린다.
-  테두리가 얇으면 아직 안 고른 질문이 남은 것이고, **굵어지면 다 골랐다는 뜻**이다
-
-입력칸은 세 곳 모두 같은 모양의 테두리 상자다 — 선택지 아래의 직접 입력, 덧붙일 말, 원하는 결과.
-- 답하지 않고 넘긴 질문은 **회색** 으로 닫힌다. 종료를 막지 않으며, 지워지는 경로는 없다
-- 앞 단계의 답과 모순되는 질문은 모델이 `revisit` 으로 돌려보내 다시 묻는다 (상향 재개방)
-- **이 질문의 답을 코드에서 찾아보기** 는 그 질문 하나에 조사 서브에이전트를 띄운다
-pane 은 **`▌질문 (tree)`** 과 **`▌원하는 결과 (feeding)`** 두 대분류로 나뉘고, 각각 제목 아래 구분선을 갖는다.
-
-- **확장 컨텍스트** 는 `▌질문` 쪽에 속한다 — **질문 목록과 `다음 단계로` 사이**에 놓인, 선택지로 담기지 않는
-  전제·제약·배경을 적는 곳이다. 대화형이었다면 그냥 말했을 내용을 여기에 적으면, 다음 단계가 그것을
-  전제로 삼고 모순되는 기존 질문은 다시 묻는다.
-  아직 안 읽힌 메모는 노란 `+` 로 표시되고, 액션 줄에 **`메모 반영 (m)`** 이 뜬다. 누르면 다음 단계로 가지 않고
-  **지금 열린 단계를 그 메모에 맞게 다시 만든다** — 전제가 뒤집혔는데 낡은 질문에 답하고 있을 필요가 없다.
-  읽힌 메모는 흐린 `·` 가 되어 전제 목록으로 내려앉지만, 전제는 계속 유효해서 트리가 어긋나면 다시 바로잡는다
-
-전제가 뒤집혀 의미를 잃은 질문은 모델이 **`drop`** 으로 걷어낸다. 되돌려 다시 묻는 `revisit` 과 달리,
-드롭된 질문은 답까지 지워지고 회색으로 닫혀 **핸드오프에도 들어가지 않는다** — 결제사를 바꾸기로 했다면
-이전 결제사에만 해당하던 질문과 그 답이 통째로 빠진다.
-- **원하는 결과** 에 적은 조건은 다음 단계 프롬프트에 함께 실려, 질문이 그쪽으로 좁혀진다
-
-두 목록 모두 할 일 목록처럼 움직인다 — 제목 옆 **`[ + 추가 ]`** 를 누르면 입력칸이 한 칸 내려오고, 적어서
-Enter 하면 행이 되고 칸은 접힌다. 각 행 끝의 **x** 로 지운다. 두 목록의 입력칸은 **동시에 열어둘 수 있다.**
-- 물어볼 것이 끝나면 **Claude에게 넘기기** 가 나타난다. 누르면 **작업 지시서**를 프롬프트로 주입하고 pane 을 닫는다
-
-## 넘어가는 것
-
-결정만 나열하지 않는다. 받는 쪽이 아무것도 되묻지 않고 바로 착수할 수 있도록 이렇게 간다.
-
-| 절 | 내용 |
-| :- | :- |
-| `## 하려는 일` | 트리를 세운 씨앗 프롬프트. 무슨 작업인지 |
-| `## 전제` | 확장 컨텍스트에 적은 것. **결정보다 먼저** 와서 결정이 어떤 바탕 위에 섰는지 보여준다 |
-| `## 확정된 결정` | 번호마다 `제목 → 답`, 그리고 **물은 것 / 왜 물었나(근거 꼬리표) / 그 선택을 고른 근거**. 직접 입력한 답은 그렇다고 밝힌다 |
-| `## 결과물이 만족해야 할 조건` | `- [ ]` 체크박스로 |
-| `## 정하지 않은 것` | 미룬 질문과 그 질문 내용. 그 자리에 오면 물어야 한다는 신호 |
-| `## 빼기로 한 것` | 전제가 바뀌어 드롭된 것. **왜 그 선택지가 없는지**를 알려 되살리는 걸 막는다 |
-| `## 진행 방법` | 다시 묻지 말 것, 전제가 결정보다 우선할 것, 빈 세부는 가장 단순하게 택하고 밝힐 것, 끝나고 조건을 짚을 것 |
-
-모델을 기다리는 동안에는 **질문 목록 자리에 스피너**가 돈다 — 불러오는 중인 것이 그 목록이기 때문이다.
-타이머는 호출이 나가 있는 동안에만 돌고, 응답이 오거나 기다리기를 멈추면 즉시 멈춘다.
-
-정한 질문이 하나라도 있으면 **여기까지만 넘기기** 가 항상 떠 있다. 끝까지 안 가도 그때까지의 트리를 넘길 수 있다.
-모델 호출이 실패하거나 응답이 깨지면 사유가 pane 에 그대로 뜨고 **다시 시도** 가 나타난다. 호출이 오래 끌면
-**그만 기다리기** 로 끊을 수 있다. 어떤 경우에도 버튼 없는 화면에 갇히지 않는다.
-
-## 언어
-
-한국어와 영어를 지원한다. pane 의 `EN` / `한국어` 버튼(`l`)으로 즉시 바꾸며, 고른 언어는 `$.store` 에 남아
-다음 세션에도 그대로 열린다. 바뀌는 범위는 pane 의 모든 문구, 명령 설명, 실패 사유, 그리고 **모델이 만드는
-질문과 선택지의 언어**, 마지막으로 Claude 에게 넘기는 핸드오프 문서까지다.
-
-문구는 `hooks/register.js` 의 `PACKS` 한 곳에 모여 있다. 언어를 추가하려면 거기에 팩을 하나 더 넣으면 된다.
-
-## 신호등
-
-| 색 | grill-me 의 존 | 뜻 |
+| Key | Button | What it does |
 | :- | :- | :- |
-| 🔴 | unknown | 아직 안 정했다. 필요한지부터 미확정 |
-| 🟡 | gray | 방향은 잡혔는데 모호한 지점이 남았다 |
-| 🟢 | known | 정했다 |
-| ⚫ | deferred | 이번엔 정하지 않기로 미뤘다. 종료를 막지 않는다 |
+| `a` | expand all | Opens every question at once. Number keys turn off while it is on, since they would collide |
+| `p` | pick all recommended | Fills every unanswered question with its recommendation. Leave it on and each new layer arrives pre-filled — then you only press next |
+| `s` | **Next step** | Settles the layer and fetches the next one. The frame goes **bold** when nothing is left to pick |
+| `m` | **apply notes** | Rebuilds the open layer around a note you just added, without moving on |
+| `r` | **Hand to Claude** | Writes the work order and closes the pane |
+| `l` | EN / 한국어 | Switches the language pack |
+| `t` | Try again | Appears when a layer fails to arrive |
+| `c` | stop waiting | Appears while a call is out |
 
-## 상태
+Anything you leave unanswered is **held**, not lost — it closes grey and is
+named in the handoff as something to ask about later.
 
-트리는 `$.state` 에 있으므로 **세션 한정**이다. `/clear`, `/resume`, `/branch` 하면 초기화된다.
-세션을 건너 트리를 들고 다니려면 `$.store` 로 옮겨야 한다.
+Every question also carries a write-in field for an answer no choice covers,
+and a **Look for the answer in the code** button that sends a subagent at that
+one decision.
 
-## 개발
+## The traffic light
+
+| | Zone | Meaning |
+| :-: | :- | :- |
+| 🔴 | unknown | Not decided. Whether it is even needed is open |
+| 🟡 | gray | The direction is set; a specific ambiguity remains |
+| 🟢 | known | Settled |
+| ⚫ | deferred | Held for later, or struck out. Neither blocks finishing |
+
+## Context and criteria
+
+Two lists sit under the questions. Both behave like a todo list — press
+**`[ + add ]`**, the field drops in, Enter makes it a row, `x` strikes it off.
+Both can be open at once.
+
+**Extended context** is for the thing no choice covers — a constraint, a
+premise, something you would simply have said in a chat.
+
+> We are locked into one payment provider.
+
+A note the open layer has not read yet is marked with a yellow `+`, and
+**apply notes** appears. Press it and the layer is rebuilt on that premise:
+questions that no longer apply are dropped, decisions it contradicts reopen.
+Once a round has read it, the note becomes a standing premise — still binding,
+but it no longer keeps knocking the same answer over.
+
+**Desired outcome** is what the finished work has to satisfy. Writing one
+narrows the questions toward it, and it reaches the handoff as a checklist.
+
+## What it hands over
+
+Not a list of decisions. A work order the next session can start from without
+asking anything again:
+
+```markdown
+# Work order
+
+## What this is for
+add a payments integration
+
+## Premises — fixed by the user
+- we are locked into one payment provider
+
+## Settled decisions
+
+### 1. Integration path → through the gateway
+- asked: how should the provider be wired in?
+- why it was asked: derived from the single-provider decision
+- grounds for this choice: reuses the existing webhook and idempotency work
+
+### 2. Retention → 30 days
+- asked: how long do we keep it?
+- the user wrote this answer instead of taking a listed choice
+
+## What the result has to satisfy
+- [ ] it must roll back without a deploy
+
+## Left open — asked, then held
+- Access control — who can see it?
+
+## Struck out — its premise changed
+- Currency handling for the old provider
+
+## How to proceed
+- The decisions above are already agreed with the user. Take them as given.
+- Where a premise and a decision disagree, the premise wins.
+- Do not decide the held items now — ask the user when you reach them.
+- The struck-out items are out of scope. Do not revive them.
+- When the work is done, go through the criteria one by one.
+```
+
+**Struck out** is the section that earns its place. Without it the next session
+sees no mention of the old provider and helpfully suggests it again.
+
+## What it costs
+
+One model call per layer, not per question. A thirteen-decision interview is
+three or four calls, and the reply is the next layer rather than the whole
+tree — roughly a tenth of what the per-question shape spends.
+
+The call rides on `$.model.fork`, so the conversation comes from the prompt
+cache and only the compact tree snapshot is new. A fork needs the main thread
+to have answered at least once, which `/tree` has not, so the first call falls
+back to a completion carrying the recent messages itself.
+
+Picking choices is free. Nothing is sent until you press next.
+
+## Language
+
+English and Korean, switched with `l` and remembered across sessions. The pack
+covers the pane, the command description, failure reasons, **the language the
+model writes its questions in**, and the handoff document.
+
+Packs live in one object in `hooks/register.js`. Adding one is adding an entry.
+
+## State
+
+The tree lives in `$.state` — **one session**. `/clear`, `/resume` and
+`/branch` reset it. The language preference lives in `$.store` and does
+outlive the session.
+
+## Development
 
 ```bash
-claude plugin validate ./tree   # 훅과 호출 목록 확인
-cd tree && claude plugin test    # 세션 없이 4개 테스트 실행
+claude plugin validate ./tree   # hooks and calls the mod makes
+cd tree && claude plugin test   # 44 tests, no session or network needed
 ```
 
-## 모델을 어떻게 부르는가
+The tests drive the pane the way a person would — press buttons by key, type
+into fields, read what got drawn — and stub the model, so they cover layering,
+cost behaviour, failure recovery and the handoff without spending a token.
 
-**레이어당 한 번**이다. 결정 하나하나가 아니라 레이어 통째로 제출될 때만 부른다 — 13개 결정짜리
-인터뷰면 13회가 아니라 3~4회. 비용의 지배항은 호출 수 × 출력이고, 응답도 전체 트리가 아니라
-`{ nodes: [다음 레이어], revisit: [되돌릴 id] }` 로 받아 출력을 작게 유지한다.
+`tsconfig.json` extends a type declaration Claude Code writes into
+`.claude-plugin/types/` when the mod is loaded with `--plugin-dir`. That
+directory is generated, so it is not committed; load the mod once and `tsc`
+will work.
 
-경로는 둘이다.
+## Limits
 
-1. **`$.model.fork`** — 이 대화를 그대로 이어받는다. 대화는 프롬프트 캐시에서 처리되고 새로 실리는 것은
-   트리 압축본뿐이라 싸다.
-2. **`$.model.complete` 폴백** — 포크는 **메인 스레드가 한 번이라도 응답한 뒤에만** 가능하다
-   (`reason: 'nothing-to-fork'`). `/tree` 는 명령이라 턴을 만들지 않으므로, 컨텍스트를 붙여넣고
-   Claude 가 답하기 전에 `/tree` 를 치면 포크할 것이 없다. 이때는 최근 메시지 12개를 직접 실어
-   완결 호출로 넘어간다.
+- Panes are drawn in the terminal and the Desktop app. The VS Code extension,
+  `claude -p` and cloud sessions run the hooks but show nothing — use the
+  `grill-me` skill there instead.
+- The tree does not survive `/clear`. Hand it over before you clear.
+- Written with Claude Code 2.1.296.
 
-둘 다 실패하면 pane 에 사유가 그대로 뜨고 트랜스크립트에도 한 줄 남는다.
+## License
 
-## 알아둘 것
-
-- pane 을 그리지 못하는 환경(VS Code 확장, `claude -p`, 클라우드 세션)에서는 훅은 돌지만 아무것도 보이지 않는다.
-  그 환경에서는 기존 `grill-me` 스킬을 쓸 것.
-- `$.model.fork` 는 `{ prompt }` 만 받는다. `maxTokens` 같은 필드를 얹으면 호출이 거부된다.
-- `$.agent.spawn` 은 `{ prompt, description, subagentType }` 을 받는다 (`type` 이 아니다).
-
-Claude Code v2.1.296 에서 작성·검증했다.
+Not decided yet. Until a license file is added, all rights are reserved by the
+author.
