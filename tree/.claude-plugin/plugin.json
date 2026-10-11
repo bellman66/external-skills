@@ -1,0 +1,7 @@
+{
+  "name": "tree",
+  "version": "0.1.0",
+  "description": "Interviews you through a clickable decision tree in a pane, keeps each node on a traffic light, and injects the settled tree into the conversation when done",
+  "author": { "name": "Jongmin Yoon" },
+  "types": "./types/index.d.ts"
+}
