@@ -7,7 +7,7 @@ A decision-tree interview for Claude Code, in a pane.
 ![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-black)
 ![Requires 2.1.287+](https://img.shields.io/badge/requires-2.1.287%2B-blue)
 ![Terminal and Desktop](https://img.shields.io/badge/surface-terminal%20%7C%20desktop-lightgrey)
-![44 tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)
+![81 tests](https://img.shields.io/badge/tests-81%20passing-brightgreen)
 
 - [Why tree](#why-tree)
 - [How it works](#how-it-works)
@@ -59,8 +59,8 @@ on each other, so they can be laid out together and answered in any order.
 │   ╭────────────────────────────────────╮    │
 │   │ how long do we keep it?            │    │
 │   │ why asked · lifecycle gap          │    │
-│   │              ✓ 90 days   ★pick     │    │
-│   │              2 forever             │    │
+│   │            ✓ 1: 90 days  ★pick     │    │
+│   │              2: forever            │    │
 │   ╰────────────────────────────────────╯    │
 │ ▸ ● access                                  │
 └─────────────────────────────────────────────┘
@@ -73,11 +73,19 @@ on each other, so they can be laid out together and answered in any order.
    ▼
   … until nothing is left to ask
    │
-   └─ [ Hand to Claude ] ──────────────────► a work order
+   └─ [ Hand to Claude and close ]─────────────────► a work order
 ```
 
 The reply is a delta — the next layer plus the ids to reopen or strike out —
 not a rewrite of the whole tree.
+
+The tree stays as small as the job. A question is asked only when its answer
+visibly changes the result **and** the implementer could not pick a sensible
+default alone; how to build, verify, branch or store things is left to the
+implementer. A simple ask often gets zero to three questions, or none at all —
+then the request goes straight over. No layer is padded to a quota (at most
+five), the model is told to wrap up from the third round, and the pane stops
+asking after four rounds regardless.
 
 ## Getting started
 
@@ -101,26 +109,67 @@ plugin, the same as any other Claude Code plugin.
 
 Questions are listed one title per line, and one of them is open. Press a
 title to open it; the one before it folds. **The numbers beside the choices
-are the keys** — press `1` to take the first choice. The recommendation is
-marked `★pick`, and what you picked turns a green `✓`.
+are the keys** — press `1` to take the first choice, and the next question
+still waiting opens by itself. After the last one nothing more opens; **Next
+step** lights up instead, so a layer is answered as `1 · 2 · 1 · s`. The
+recommendation is marked `★pick`, and what you picked turns a green `✓`.
+
+The pane is drawn with the widgets Claude Code draws its own dialogs with —
+a choice as `1: label`, an action as `[ label ]`, the traffic light and the
+badges in the theme's status colors. Only the one button to press next is
+highlighted, and a line at the bottom says which keys work **right now** —
+only `c` while a call is out, Enter and Esc while a field is open, otherwise
+Tab, Enter, Esc and the digits. The language button sits at its end.
+
+Each section sits in a rounded card, the way `/context` draws its own. A
+card's title is set in the theme's blue, bold, behind a bar — `▍Questions (tree)` —
+with a line of air under it to keep it off the content. The card on top,
+**◆ tree**, is two lines:
+
+```
+│ ◆ tree  ●●○○ step 2                       1 of 3 picked │
+│ ████▓▓░░░░░░░░░░░░▒▒                  █ 2  ▓ 1  ░ 4  ▒ 1 │
+```
+
+The first is the step — one dot per round, the ones taken filled — and how
+many are picked. The second is a bar split by the traffic light's shares, each
+zone in its own shade, `█ ▓ ░ ▒`, with a count per shade beside it. When the
+pane is 36 rows or taller, a tree whose 35 leaves take the same shares stands
+on the left — any shorter and it would push the first question below the fold,
+so the two lines are all there is. A narrow pane drops it the same way.
 
 | Key | Button | What it does |
 | :- | :- | :- |
 | `a` | expand all | Opens every question at once. Number keys turn off while it is on, since they would collide |
 | `p` | pick all recommended | Fills every unanswered question with its recommendation. Leave it on and each new layer arrives pre-filled — then you only press next |
-| `s` | **Next step** | Settles the layer and fetches the next one. The frame goes **bold** when nothing is left to pick |
-| `m` | **apply notes** | Rebuilds the open layer around a note you just added, without moving on |
-| `r` | **Hand to Claude** | Writes the work order and closes the pane |
-| `l` | EN / 한국어 | Switches the language pack |
-| `t` | Try again | Appears when a layer fails to arrive |
-| `c` | stop waiting | Appears while a call is out |
+| `s` | **Next step** | Settles the layer and fetches the next one. The button is **highlighted** once nothing is left to pick; with picks missing its label says `1/3 · 2 held`, and sends anyway |
+| `w` | Write in | Opens a field on the open question for an answer no choice covers |
+| `f` | look in the code | Sends a research subagent at that one decision |
+| `m` | **apply context** | Rebuilds the open layer on the request and the whole context, without moving on |
+| `r` | **Hand to Claude and close** | Writes the work order and closes the pane |
+| `l` | EN / 한국어 | Switches the language pack. Lives on the hint line at the bottom |
+| `t` | Try again | Appears when a layer fails to arrive, the first one included |
+| `c` | stop waiting | Appears while a call is out. A reply that lands after you stopped is thrown away |
 
-Anything you leave unanswered is **held**, not lost — it closes grey and is
-named in the handoff as something to ask about later.
+Anything you leave unanswered is **held**, not lost — it is listed above the
+questions with the earlier rounds' decisions, one row each: a picked one opens
+with a green `Pass`, a held one with a dim `held`. Every row has `ask again`,
+which puts that decision back on the open layer, and a held one is also named
+in the handoff as something to ask about later.
 
-Every question also carries a write-in field for an answer no choice covers,
-and a **Look for the answer in the code** button that sends a subagent at that
-one decision.
+What the model settled without asking — an implementation default, a fact
+it could read off the code — is listed at the top of the questions card,
+above the questions, one row each. There is no title: every row opens with a
+green **`Pass`**, saying the model settled it on your behalf and moved on.
+An `ask` button turns one into a question on the open layer, with a yellow dot — a direction already stands, so it is not an open red. A question the request never raised carries an `added` mark, and a
+decision struck or held takes the questions that grew out of it along.
+
+Under an open question's choices sits one line, `w Write in · f look in the
+code`. `w` opens a field for an answer no choice covers, and what you write
+stays on the card as a `✓ written · …` row, so you can see it was taken. `f`
+sends a research subagent at that one decision — the title gets a
+`researching` mark, and the findings come back in the conversation. Like the
+digits, the two letters are live only one question at a time.
 
 ## The traffic light
 
@@ -133,23 +182,36 @@ one decision.
 
 ## Context and criteria
 
-Two lists sit under the questions. Both behave like a todo list — press
-**`[ + add ]`**, the field drops in, Enter makes it a row, `x` strikes it off.
-Both can be open at once.
+The pane stacks three sections top to bottom: **Context / Questions / Desired
+outcome**. Context and desired outcome behave like a todo list — press
+**`[ + add ]`** right under the rows, the field opens in its place, Enter
+makes it a row, `x` strikes it off. Both can be open at once.
 
-**Extended context** is for the thing no choice covers — a constraint, a
-premise, something you would simply have said in a chat.
+**Context** opens with the request you gave `/tree` as its first row, and
+below it holds the things no choice covers — a constraint, a premise,
+something you would simply have said in a chat.
 
 > We are locked into one payment provider.
 
-A note the open layer has not read yet is marked with a yellow `+`, and
-**apply notes** appears. Press it and the layer is rebuilt on that premise:
-questions that no longer apply are dropped, decisions it contradicts reopen.
-Once a round has read it, the note becomes a standing premise — still binding,
-but it no longer keeps knocking the same answer over.
+Every row carries a `pending` or `applied` badge. While anything is pending,
+**apply context** appears beside `[ + add ]`. Press it and the open layer is rebuilt on the
+request and the whole context: questions that no longer apply are dropped,
+decisions it contradicts reopen. Moving to the next step reads pending rows
+too. Once a round has read a row it becomes a standing premise — still
+binding, but it no longer keeps knocking the same answer over.
+
+- Applied rows, the request included, **fold on their own** into one
+  `▸ N applied` line on the heading's right. Press it to open, again to shut.
+- The request and every row can be edited. An edit sends the row back to
+  pending and out of the fold. The request cannot be removed.
+- Removing an applied row leaves the tree as it is and brings
+  **apply context** back.
+- Context is locked while an apply is out. If it fails, the tree and the
+  badges stay as they were and the button turns into **apply context again**.
 
 **Desired outcome** is what the finished work has to satisfy. Writing one
 narrows the questions toward it, and it reaches the handoff as a checklist.
+Every row has `edit`, which rewrites it in place as a context row's does.
 
 ## What it hands over
 
@@ -220,19 +282,31 @@ Packs live in one object in `hooks/register.js`. Adding one is adding an entry.
 ## State
 
 The tree lives in `$.state` — **one session**. `/clear`, `/resume` and
-`/branch` reset it. The language preference lives in `$.store` and does
+`/branch` reset it, and so does a new `/tree`: the last interview's tree,
+context and criteria do not carry into the next one. The language preference lives in `$.store` and does
 outlive the session.
 
 ## Development
 
 ```bash
 claude plugin validate ./tree   # hooks and calls the mod makes
-cd tree && claude plugin test   # 44 tests, no session or network needed
+cd tree && claude plugin test   # 81 tests, no session or network needed
+bun evals/depth.ts --runs 3     # real model: right depth, and only the user's own questions
 ```
 
 The tests drive the pane the way a person would — press buttons by key, type
 into fields, read what got drawn — and stub the model, so they cover layering,
 cost behaviour, failure recovery and the handoff without spending a token.
+
+What the model is told lives in one file, `prompts/tree.md`, not in the code.
+It says what the tree is, how it grows and what to do once a tree already
+stands; every call — the first layer, the next one, a layer rebuilt after the
+context changed — sends it alike. Under it the state is stacked as `## `
+sections — request, tree, progress, desired outcome,
+context, language. A section with nothing in it is left out; how to read each
+one is written in `tree.md`. To change what the
+interview asks, edit the `.md` and run the eval; the tests only check which
+files are stacked in what order.
 
 `tsconfig.json` extends a type declaration Claude Code writes into
 `.claude-plugin/types/` when the mod is loaded with `--plugin-dir`. That

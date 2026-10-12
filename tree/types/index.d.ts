@@ -24,6 +24,12 @@ declare module 'claude-code' {
     answer: string
     /** struck off because the premise it belonged to changed */
     dropped?: boolean
+    /** the node this decision grew out of; its fate is this one's too */
+    parent?: string
+    /** a decision the model added that the request never raised */
+    isExpansion?: boolean
+    /** settled by the model without asking, `tag` holding the grounds */
+    assumed?: boolean
   }
 
   /** What the finished work has to satisfy. The user writes these. */
@@ -33,11 +39,11 @@ declare module 'claude-code' {
   }
 
   /** Something the user wants the interview to know, that isn't an answer */
-  interface TreeNote {
+  interface TreeContextItem {
     id: string
     text: string
-    /** the layer it was written in; once a round has read it, it is a premise */
-    layer: number
+    /** a round has folded it into the tree; editing it puts it back to pending */
+    applied: boolean
   }
 
   interface TreeView {
@@ -57,6 +63,22 @@ declare module 'claude-code' {
     lang: 'ko' | 'en'
     /** which lists have their field open — any number of them at once */
     adding: string[]
+    /** the request the tree grew out of has been read by a round */
+    seedApplied: boolean
+    /** an applied context item was removed since the last round */
+    stale: boolean
+    /** the applied context rows sit folded under one line */
+    folded: boolean
+    /** the context row being edited: an item id, or 'seed' for the request */
+    editing: string | null
+    /** the last apply came back without a tree */
+    applyFailed: boolean
+    /** the notice on screen is a failure, drawn in the error color */
+    alert: boolean
+    /** the decision whose write-in field is open, or null */
+    writing: string | null
+    /** the decisions a research agent has been sent at */
+    probing: string[]
   }
 
   interface PluginState {
@@ -64,7 +86,7 @@ declare module 'claude-code' {
       nodes: TreeNode[]
       feeding: TreeFeed[]
       /** free-form context the user adds alongside the answers */
-      notes: TreeNote[]
+      context: TreeContextItem[]
       view: TreeView
       /** answers picked but not yet submitted, by node id */
       draft: Record<string, string>

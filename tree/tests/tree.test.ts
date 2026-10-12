@@ -17,6 +17,9 @@ const PANE = {
   },
 } as const
 
+// The same pane with room enough for the summary's tree
+const TALL = { ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 48 } } } as const
+
 const SEED = '세션 로그를 어디에 보관할지 정하고 싶다'
 
 // Layer 1: two decisions that don't depend on each other
@@ -77,7 +80,32 @@ function stubLayers(on: any, replies: string[]) {
   return seen
 }
 
+// A test can't open a .md, so each prompt file answers with its own name:
+// what is checked here is which files are stacked and in what order. What the
+// files say is checked against the real model by evals/depth.ts.
+function servePrompts(on: any) {
+  on('fs.read', ($: unknown, e: { path: string }) => ({
+    value: '[' + e.path.replace(/^.*[\\/](prompts)[\\/](\w+\.md)$/, '$1/$2') + ']',
+  }))
+}
+
+// Every Text under one drawn element, depth first
+function textsIn(node: any): any[] {
+  if (!node || typeof node !== 'object') return []
+  const own = node.type === 'Text' ? [node] : []
+  return [...own, ...((node.children || []) as unknown[]).flatMap(textsIn)]
+}
+
+// How many decisions the summary's legend counts in one zone
+async function zoneCount(ui: any, zone: string) {
+  const item = await ui.find({ key: 'legend-' + zone })
+  // The zone's shade, then its count in bold
+  const value = (item.children as Array<{ children?: unknown[] }>)[1]
+  return Number((value.children || [])[0])
+}
+
 async function openTree($: any, on: any, replies: string[]) {
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const seen = stubLayers(on, replies)
@@ -159,9 +187,11 @@ test('auto-pilot does not overwrite an answer already picked', async ($, on) => 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'opt-n1-o2' })
   await ui.press({ key: 'auto' })
-  // The hand-picked choice stays; only the untouched decision gets a default
+  // The hand-picked choice stays, folded on its title row; only the untouched
+  // decision — open now, since the pick moved the hand there — gets a default
+  expect(await ui.find({ type: 'Text', text: '→ 평문 파일' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '✓' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '→ 90일' })).toBeDefined()
+  expect(await ui.find({ key: 'opt-n2-o1' })).toMatchObject({ props: { dimColor: false } })
   await ui.unmount()
 })
 
@@ -182,7 +212,7 @@ test('picking choices costs nothing — the model is called once per layer', asy
   expect(seen.calls).toBe(2)
 
   // Settled decisions collapse into a count, and layer 2 is open
-  expect(await ui.find({ type: 'Text', text: /정한 것 2/ })).toBeDefined()
+  expect(await zoneCount(ui, 'known')).toBe(2)
   expect(await ui.find({ key: 'node-n3' })).toBeDefined()
   await ui.unmount()
 })
@@ -195,8 +225,9 @@ test('a decision left unanswered is held, not dropped', async ($, on) => {
   await ui.press({ key: 'submit' })
 
   // The skipped one went to the model as held, and is counted as grey
-  expect(seen.prompts[1]).toContain('미룬 것: n2')
-  expect(await ui.find({ type: 'Text', text: /정한 것 1 · 미룬 것 1/ })).toBeDefined()
+  expect(seen.prompts[1]).toContain('- n2 [L1/deferred] 보존 기한')
+  expect(await zoneCount(ui, 'known')).toBe(1)
+  expect(await zoneCount(ui, 'deferred')).toBe(1)
   await ui.unmount()
 })
 
@@ -213,7 +244,7 @@ test('a reopened decision comes back into the new layer', async ($, on) => {
 
   // n1 was settled, then reopened: it is asked again rather than staying closed
   expect(await ui.find({ key: 'node-n1' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /정한 것 1/ })).toBeDefined()
+  expect(await zoneCount(ui, 'known')).toBe(1)
   await ui.unmount()
 })
 
@@ -276,6 +307,7 @@ test('다시 시도 asks for the layer again and recovers', async ($, on) => {
 })
 
 test('a call that throws still releases the pane', async ($, on) => {
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.log', () => ({ value: undefined }))
@@ -303,6 +335,7 @@ test('a call that throws still releases the pane', async ($, on) => {
 })
 
 test('기다리지 않기 releases a pane that is still waiting', async ($, on) => {
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
@@ -337,8 +370,8 @@ test('the pane is split into a Tree section and a Feeding section', async ($, on
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '▌질문' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▌원하는 결과' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '질문' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '원하는 결과' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /1단계/ })).toBeDefined()
   await ui.unmount()
 })
@@ -355,12 +388,12 @@ test('an opened decision shows its reason left and a numbered pick right', async
   expect(await ui.find({ key: 'opt-n1-o2', text: '평문 파일' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /한 파일로 끝난다/ })).toBeDefined()
 
-  // Picking swaps the number for a check, and the choice echoes on the title row
+  // Picking folds the decision and lifts the answer to its title row, in full
   await ui.press({ key: 'opt-n1-o1' })
-  expect(await ui.find({ type: 'Text', text: '✓' })).toBeDefined()
-  // Folding it lifts the answer to the title row, in full
-  await ui.press({ key: 'node-n1' })
   expect(await ui.find({ type: 'Text', text: '→ SQLite' })).toBeDefined()
+  // Opened again, the number has become a check
+  await ui.press({ key: 'node-n1' })
+  expect(await ui.find({ type: 'Text', text: '✓' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -368,16 +401,25 @@ test('the picked choice is marked in colour, not by a tick alone', async ($, on)
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  // Before picking, the marks are dim numbers and the recommendation is yellow
-  expect(await ui.find({ type: 'Text', text: '1' })).toMatchObject({ props: { dimColor: true } })
-  expect(await ui.find({ type: 'Text', text: '★추천' })).toMatchObject({ props: { color: 'yellow' } })
+  // Before picking, the host draws the key itself (`1: SQLite`), so no number
+  // is drawn beside it; the recommendation carries the theme's hint color
+  expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '★추천' })).toMatchObject({ props: { color: 'suggestion' } })
 
   await ui.press({ key: 'opt-n1-o1' })
-  // The pick carries colour, since a Button cannot take one itself
-  expect(await ui.find({ type: 'Text', text: '✓' })).toMatchObject({ props: { color: 'green', bold: true } })
+  // The pick moved the hand on to the next decision, so this one is folded
+  // with its answer on the title row; opened again, the pick carries colour,
+  // since a Button cannot take one itself
+  expect(await ui.find({ type: 'Text', text: '→ SQLite' })).toMatchObject({ props: { color: 'success' } })
+  await ui.press({ key: 'node-n1' })
+  expect(await ui.find({ type: 'Text', text: '✓' })).toMatchObject({ props: { color: 'success', bold: true } })
   // And the choices not taken go dim, so the picked one stands out
   expect(await ui.find({ key: 'opt-n1-o2' })).toMatchObject({ props: { dimColor: true } })
   expect(await ui.find({ key: 'opt-n1-o1' })).toMatchObject({ props: { dimColor: false } })
+  // With every decision open the keys are off, so the numbers are drawn dim
+  await ui.press({ key: 'expand' })
+  const numbers = textsIn(await ui.find({ key: 'card-n1' })).filter((t) => String((t.children || [])[0]) === '2')
+  expect(numbers[0]).toMatchObject({ props: { dimColor: true } })
   await ui.unmount()
 })
 
@@ -413,39 +455,43 @@ test('an opened decision sits in a bordered card, the folded ones do not', async
   await ui.unmount()
 })
 
-test('context belongs to the tree; feeding is a heading of its own', async ($, on) => {
+test('context, questions and feeding stack top to bottom as three sections', async ($, on) => {
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  const rows = (await ui.find({ type: 'Box' })).children as Array<{
-    props?: { key?: string }
-    children?: unknown[]
+  const cards = (await ui.find({ type: 'Box' })).children as Array<{
+    props?: { key?: string; borderStyle?: string }
+    children?: Array<{ props?: { key?: string } }>
   }>
-  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
+  const at = (key: string) => cards.findIndex((r) => r.props && r.props.key === key)
 
-  // The context list sits under the questions and above what moves them on
-  expect(at('notebar')).toBeGreaterThan(at('viewbar'))
-  expect(at('actionbar')).toBeGreaterThan(at('notebar'))
-  // Feeding starts the second half, below all of it
-  expect(at('feedbar')).toBeGreaterThan(at('actionbar'))
-  // With real air between the halves, not one blank line
-  const gap = rows.slice(at('actionbar') + 1, at('feedbar'))
-  expect(gap.filter((r) => String((r.children || [])[0]) === ' ').length).toBeGreaterThan(1)
-  // …and carries its own rule, which is what keeps the two halves apart
-  const underFeed = rows[at('feedbar') + 1]
-  expect(String((underFeed.children || [])[0])).toMatch(/^─+$/)
+  // The summary card opens the pane, then context, questions and feeding
+  expect(at('summary')).toBe(0)
+  expect(at('ctxcard')).toBe(1)
+  expect(at('treecard')).toBe(2)
+  expect(at('feedcard')).toBe(3)
+  // Each section is a rounded card, and each card opens on its own heading
+  for (const [cardKey, headKey] of [
+    ['ctxcard', 'ctxbar'],
+    ['treecard', 'treebar'],
+    ['feedcard', 'feedbar'],
+  ]) {
+    const one = cards[at(cardKey)]
+    expect(one.props?.borderStyle).toBe('round')
+    expect((one.children || [])[0].props?.key).toBe(headKey)
+  }
   await ui.unmount()
 })
 
-test('the two halves are titled, the list inside one is not', async ($, on) => {
+test('all three sections are titled, and extended context is gone', async ($, on) => {
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  // Both top-level headings are marked; the context list is a plain label
-  expect(await ui.find({ type: 'Text', text: '▌질문' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▌원하는 결과' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '확장 컨텍스트' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▌확장 컨텍스트' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '컨텍스트' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '(context)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '질문' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '원하는 결과' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /확장 컨텍스트/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -453,9 +499,9 @@ test('the section titles carry their original names in brackets', async ($, on) 
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '▌질문' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '질문' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '(tree)' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▌원하는 결과' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '원하는 결과' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '(feeding)' })).toBeDefined()
   await ui.unmount()
 })
@@ -474,8 +520,8 @@ test('the language button swaps the pack and remembers the choice', async ($, on
 
   await ui.press({ key: 'lang' })
   // Every word of the pane comes from the pack, titles and hints alike
-  expect(await ui.find({ type: 'Text', text: '▌Questions' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '▌Desired outcome' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Questions' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Desired outcome' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /step 1/ })).toBeDefined()
   expect(await ui.find({ key: 'submit', text: /^Next step/ })).toBeDefined()
   expect(await ui.find({ key: 'lang', text: '한국어' })).toBeDefined()
@@ -517,7 +563,7 @@ test('a narrow pane stacks the two columns instead of splitting', async ($, on) 
   const narrow = { ...PANE, props: { ...PANE.props, bodyColumns: 48 } }
   const ui = await $.ui.mount(narrow)
   expect(await ui.find({ key: 'opt-n1-o1' })).toBeDefined()
-  expect(await ui.find({ key: 'write-n1' })).toBeDefined()
+  expect(await ui.find({ key: 'open-write-n1' })).toBeDefined()
   expect(await ui.find({ key: 'submit' })).toBeDefined()
   await ui.unmount()
 })
@@ -526,7 +572,13 @@ test('writing an answer that no choice covers counts toward the layer', async ($
   const seen = await openTree($, on, [LAYER1, LAYER2])
 
   const ui = await $.ui.mount(PANE)
+  // The field comes out only when asked for
+  expect(await ui.find({ key: 'write-n1' })).toBeUndefined()
+  await ui.press({ key: 'open-write-n1' })
+  expect(await ui.find({ key: 'write-n1' })).toMatchObject({ props: { autoFocus: true } })
   await ui.input({ key: 'write-n1', text: 'Postgres 를 이미 쓰고 있으니 테이블만 추가' })
+  // Submitting puts the field away again
+  expect(await ui.find({ key: 'write-n1' })).toBeUndefined()
   // Typing an answer is still free — nothing is sent until the layer is submitted
   expect(seen.calls).toBe(1)
   expect(await ui.find({ key: 'submit', text: /1\/2/ })).toBeDefined()
@@ -538,6 +590,7 @@ test('writing an answer that no choice covers counts toward the layer', async ($
 
 test('with nothing to fork yet, it still builds the layer from the messages', async ($, on) => {
   const completions: string[] = []
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   // Before the main thread has answered once, a fork has nothing to ride on
@@ -561,6 +614,7 @@ test('with nothing to fork yet, it still builds the layer from the messages', as
 })
 
 test('a model that answers nothing says why on the pane', async ($, on) => {
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.log', () => ({ value: undefined }))
@@ -580,9 +634,10 @@ test('the action row sits under the choices, not up in the heading', async ($, o
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  const pane = await ui.find({ type: 'Box' })
-  const rows = pane.children as Array<{ props?: { key?: string } }>
-  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
+  const rows = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
+  // The view options sit on the heading's right, so the heading stands for them
+  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === (key === 'viewbar' ? 'treebar' : key))
+  expect(await ui.find({ key: 'viewbar' })).toBeDefined()
   const viewRow = at('viewbar')
   const actionRow = at('actionbar')
   const cardRow = at('card-n1')
@@ -599,17 +654,17 @@ test('each bottom list adds a row the way a todo list does', async ($, on) => {
 
   const ui = await $.ui.mount(PANE)
   // The field is not in the way until the add button asks for it
-  expect(await ui.find({ key: 'note' })).toBeUndefined()
-  expect(await ui.find({ key: 'add-note' })).toBeDefined()
+  expect(await ui.find({ key: 'ctx' })).toBeUndefined()
+  expect(await ui.find({ key: 'add-ctx' })).toBeDefined()
 
-  await ui.press({ key: 'add-note' })
-  const input = await ui.find({ key: 'note' })
+  await ui.press({ key: 'add-ctx' })
+  const input = await ui.find({ key: 'ctx' })
   expect(input).toMatchObject({ props: { autoFocus: true } })
 
-  await ui.input({ key: 'note', text: '결제사는 토스만 쓴다' })
+  await ui.input({ key: 'ctx', text: '결제사는 토스만 쓴다' })
   // Submitting adds the row and puts the field away again
   expect(await ui.find({ type: 'Text', text: '결제사는 토스만 쓴다' })).toBeDefined()
-  expect(await ui.find({ key: 'note' })).toBeUndefined()
+  expect(await ui.find({ key: 'ctx' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -617,21 +672,22 @@ test('both lists can have their field open at the same time', async ($, on) => {
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'add-note' })
+  await ui.press({ key: 'add-ctx' })
   await ui.press({ key: 'add-feed' })
   // Opening one no longer closes the other
-  expect(await ui.find({ key: 'note' })).toBeDefined()
+  expect(await ui.find({ key: 'ctx' })).toBeDefined()
   expect(await ui.find({ key: 'feed' })).toBeDefined()
 
   // Submitting one closes only that one
-  await ui.input({ key: 'note', text: '결제사는 토스만 쓴다' })
-  expect(await ui.find({ key: 'note' })).toBeUndefined()
+  await ui.input({ key: 'ctx', text: '결제사는 토스만 쓴다' })
+  expect(await ui.find({ key: 'ctx' })).toBeUndefined()
   expect(await ui.find({ key: 'feed' })).toBeDefined()
   await ui.unmount()
 })
 
 test('the wait turns a spinner where the questions will appear', async ($, on) => {
   const clock = mock.clock(on)
+  servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
@@ -658,9 +714,9 @@ test('the wait turns a spinner where the questions will appear', async ($, on) =
   }
 
   // The spinner stands in the list's place, above what moves the round on
-  const rows = (await ui.find({ type: 'Box' })).children as Array<{ props?: { key?: string } }>
+  const rows = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
   const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
-  expect(at('loading')).toBeGreaterThan(at('viewbar'))
+  expect(at('loading')).toBeGreaterThan(at('treebar'))
   expect(at('loading')).toBeLessThan(at('actionbar'))
 
   // And it actually turns as time passes
@@ -678,7 +734,7 @@ test('the wait turns a spinner where the questions will appear', async ($, on) =
   await ui.unmount()
 })
 
-test('every action is a framed button, none is bare text', async ($, on) => {
+test('every action is a button of the host, none is bare text', async ($, on) => {
   on('ui.log', () => ({ value: undefined }))
   // The second call refuses, which puts retry and the partial handoff on screen
   await openTree($, on, [LAYER1, JSON.stringify({ oops: true })])
@@ -688,12 +744,13 @@ test('every action is a framed button, none is bare text', async ($, on) => {
   await ui.press({ key: 'submit' })
 
   const bar = await ui.find({ key: 'actionbar' })
-  const frames = bar.children as Array<{ props?: { borderStyle?: string }; children?: unknown[] }>
-  expect(frames.length).toBe(2)
-  for (const frame of frames) {
-    // Each action is wrapped, so none of them reads as a line of text
-    expect(frame.props?.borderStyle).toBeDefined()
-    expect((frame.children as Array<{ type?: string }>)[0].type).toBe('Button')
+  const buttons = bar.children as Array<{ type?: string; props?: { variant?: string; plain?: true } }>
+  expect(buttons.length).toBe(2)
+  for (const button of buttons) {
+    // Each action is a `[ label ]` of the host's, so none of them reads as a line of text
+    expect(button.type).toBe('Button')
+    expect(button.props?.plain).toBeUndefined()
+    expect(button.props?.variant).toBeDefined()
   }
   expect(await ui.find({ key: 'handoff', text: '여기까지만 넘기기' })).toBeDefined()
   await ui.unmount()
@@ -703,16 +760,17 @@ test('the add control is a button, not a line of text', async ($, on) => {
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  // No `plain`, so the app draws it with brackets like any other button
-  const add = await ui.find({ key: 'add-note' })
+  // The host's own `[ ]` button with an accent plus inside, not a bare line
+  const add = await ui.find({ key: 'add-ctx' })
+  expect(add.props.label).toBe('추가')
   expect(add.props.plain).toBeUndefined()
-  expect(add.props.label).toBe('+ 추가')
+  expect(await ui.find({ type: 'Text', text: '+ 추가' })).toMatchObject({ props: { color: 'claude' } })
 
   // And it says how to put it away again once it is open
-  await ui.press({ key: 'add-note' })
-  expect(await ui.find({ key: 'add-note', text: '닫기' })).toBeDefined()
-  await ui.press({ key: 'add-note' })
-  expect(await ui.find({ key: 'note' })).toBeUndefined()
+  await ui.press({ key: 'add-ctx' })
+  expect(await ui.find({ key: 'add-ctx', text: '닫기' })).toBeDefined()
+  await ui.press({ key: 'add-ctx' })
+  expect(await ui.find({ key: 'ctx' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -737,19 +795,15 @@ test('a row can be struck off either list', async ($, on) => {
   await ui.unmount()
 })
 
-test('the next-step box goes bold once nothing is left to pick', async ($, on) => {
+test('the next-step button turns primary once nothing is left to pick', async ($, on) => {
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  const bar = await ui.find({ key: 'actionbar' })
-  const frame = (bar.children as Array<{ props?: { borderStyle?: string } }>)[0]
-  expect(frame.props?.borderStyle).toBe('round')
+  expect(await ui.find({ key: 'submit' })).toMatchObject({ props: { variant: 'secondary' } })
 
-  // Answer everything: the frame turns bold, which is the "ready" signal
+  // Answer everything: the button becomes the host's primary, which is the "ready" signal
   await ui.press({ key: 'auto' })
-  const after = await ui.find({ key: 'actionbar' })
-  const readyFrame = (after.children as Array<{ props?: { borderStyle?: string } }>)[0]
-  expect(readyFrame.props?.borderStyle).toBe('bold')
+  expect(await ui.find({ key: 'submit' })).toMatchObject({ props: { variant: 'primary' } })
   await ui.unmount()
 })
 
@@ -768,8 +822,8 @@ test('a note can be added for what no choice covers', async ($, on) => {
   const seen = await openTree($, on, [LAYER1, LAYER2])
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'add-note' })
-  await ui.input({ key: 'note', text: '결제사는 토스만 쓴다' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '결제사는 토스만 쓴다' })
   // It is listed, and it costs nothing until the layer is submitted
   expect(await ui.find({ type: 'Text', text: '결제사는 토스만 쓴다' })).toBeDefined()
   expect(seen.calls).toBe(1)
@@ -777,8 +831,7 @@ test('a note can be added for what no choice covers', async ($, on) => {
   await ui.press({ key: 'auto' })
   await ui.press({ key: 'submit' })
   // The next layer is asked for with that context as a premise
-  expect(seen.prompts[1]).toContain('방금 덧붙인 맥락')
-  expect(seen.prompts[1]).toContain('결제사는 토스만 쓴다')
+  expect(seen.prompts[1]).toContain('- [미반영] 결제사는 토스만 쓴다')
   await ui.unmount()
 })
 
@@ -805,19 +858,20 @@ test('a note can be folded into the open layer without submitting it', async ($,
   // Layer 2 is open, built on a premise the user is about to overturn
   expect(await ui.find({ key: 'node-n3' })).toBeDefined()
 
-  await ui.press({ key: 'add-note' })
-  await ui.input({ key: 'note', text: 'PayPal 말고 KCP 로 전환' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: 'PayPal 말고 KCP 로 전환' })
 
   // An unread note offers to be applied here and now, before submitting
   expect(await ui.find({ key: 'apply' })).toBeDefined()
   await ui.press({ key: 'apply' })
 
   // The same layer was rebuilt: its old question is gone, a new one took over
-  expect(seen.prompts[2]).toContain('2번째 레이어를 이 맥락에 맞게 다시 만들어라')
+  expect(seen.prompts[2]).toContain('## 지금까지의 트리')
+  expect(seen.prompts[2]).toContain('만들 레이어: 2')
   expect(await ui.find({ key: 'node-k1' })).toBeDefined()
   expect(await ui.find({ key: 'node-n3' })).toBeUndefined()
   // The settled decision the note overturned is struck off, not left answered
-  expect(await ui.find({ type: 'Text', text: /미룬 것 1/ })).toBeDefined()
+  expect(await zoneCount(ui, 'deferred')).toBe(1)
   // And the note counts as read, so the button steps aside
   expect(await ui.find({ key: 'apply' })).toBeUndefined()
   await ui.unmount()
@@ -850,21 +904,20 @@ test('a note stops reopening decisions once a round has read it', async ($, on) 
   const seen = await openTree($, on, [LAYER1, LAYER2, DONE])
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'add-note' })
-  await ui.input({ key: 'note', text: '결제사는 토스만 쓴다' })
-  // Unread, it is flagged in the list and sent as grounds for reopening
-  expect(await ui.find({ type: 'Text', text: '+' })).toMatchObject({ props: { color: 'yellow' } })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '결제사는 토스만 쓴다' })
+  // Pending, it is flagged in the list and sent as grounds for reopening
+  expect(await ui.find({ type: 'Text', text: '미반영' })).toMatchObject({ props: { color: 'warning' } })
 
   await ui.press({ key: 'auto' })
   await ui.press({ key: 'submit' })
-  expect(seen.prompts[1]).toContain('방금 덧붙인 맥락')
+  expect(seen.prompts[1]).toContain('- [미반영] 결제사는 토스만 쓴다')
 
   // Next round it has become a standing premise: kept, but no longer a trigger
   await ui.press({ key: 'auto' })
   await ui.press({ key: 'submit' })
-  expect(seen.prompts[2]).toContain('앞서 밝혀둔 전제')
-  expect(seen.prompts[2]).toContain('결제사는 토스만 쓴다')
-  expect(seen.prompts[2]).not.toContain('방금 덧붙인 맥락')
+  expect(seen.prompts[2]).toContain('- [반영됨] 결제사는 토스만 쓴다')
+  expect(seen.prompts[2]).not.toContain('[미반영]')
   await ui.unmount()
 })
 
@@ -892,12 +945,13 @@ test('the handoff is a work order, not a list of decisions', async ($, on) => {
   await openTree($, on, [LAYER1, held, DONE])
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'add-note' })
-  await ui.input({ key: 'note', text: '레거시 DB 는 못 건드린다' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '레거시 DB 는 못 건드린다' })
   await ui.press({ key: 'add-feed' })
   await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+  // The pick on n1 opens n2 by itself
   await ui.press({ key: 'opt-n1-o1' })
-  await ui.press({ key: 'node-n2' })
+  await ui.press({ key: 'open-write-n2' })
   await ui.input({ key: 'write-n2', text: '30일' })
   await ui.press({ key: 'submit' })
   // Leave the last question unanswered, so it is carried as held
@@ -942,8 +996,8 @@ test('notes travel with the handoff', async ($, on) => {
   await openTree($, on, [LAYER1, DONE])
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'add-note' })
-  await ui.input({ key: 'note', text: '레거시 DB 는 못 건드린다' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '레거시 DB 는 못 건드린다' })
   await ui.press({ key: 'auto' })
   await ui.press({ key: 'submit' })
   await ui.press({ key: 'handoff' })
@@ -960,5 +1014,826 @@ test('what the user wants out of it shows up as a checklist', async ($, on) => {
   await ui.press({ key: 'add-feed' })
   await ui.input({ key: 'feed', text: '배포 없이 롤백할 수 있어야 한다' })
   expect(await ui.find({ type: 'Text', text: '배포 없이 롤백할 수 있어야 한다' })).toBeDefined()
+  await ui.unmount()
+})
+
+// The keys of every element on the pane, for rows whose id is made at runtime
+async function keysOn(ui: any) {
+  const keys: string[] = []
+  JSON.stringify(await ui.find({ type: 'Box' }), (k, v) => {
+    if (k === 'key' && typeof v === 'string') keys.push(v)
+    return v
+  })
+  return keys
+}
+
+test('the request sits in the context, folded once the first layer read it', async ($, on) => {
+  await openTree($, on, [LAYER1])
+
+  const ui = await $.ui.mount(PANE)
+  // Applied right away, so it folds into the count with nothing to apply;
+  // the count line is itself the toggle
+  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 1개' })).toMatchObject({ props: { plain: true } })
+  expect(await ui.find({ key: 'ctxrow-seed' })).toBeUndefined()
+  expect(await ui.find({ key: 'apply' })).toBeUndefined()
+
+  await ui.press({ key: 'ctx-fold' })
+  expect(await ui.find({ type: 'Text', text: SEED })).toBeDefined()
+  expect(await ui.find({ key: 'ctx-fold', text: '▾ 반영됨 1개' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an added item is pending until applied, then folds with the rest', async ($, on) => {
+  const revised = JSON.stringify({ nodes: [], revisit: [], drop: [] })
+  const seen = await openTree($, on, [LAYER1, revised])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '레거시 DB 는 못 건드린다' })
+  // Out in the open with its badge, and the apply button has come up
+  expect(await ui.find({ type: 'Text', text: '레거시 DB 는 못 건드린다' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '미반영' })).toBeDefined()
+  expect(await ui.find({ key: 'apply', text: '컨텍스트 반영 (m)' })).toBeDefined()
+
+  await ui.press({ key: 'apply' })
+  // The whole context went in: the request and the item
+  expect(seen.prompts[1]).toContain('## 요구\n\n' + SEED)
+  expect(seen.prompts[1]).toContain('레거시 DB 는 못 건드린다')
+  // Both now applied, folded into one line, and nothing left to apply
+  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 2개/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '레거시 DB 는 못 건드린다' })).toBeUndefined()
+  expect(await ui.find({ key: 'apply' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('editing an applied item sends it back to pending, out of the fold', async ($, on) => {
+  const revised = JSON.stringify({ nodes: [], revisit: [], drop: [] })
+  await openTree($, on, [LAYER1, revised, revised])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  await ui.press({ key: 'apply' })
+  await ui.press({ key: 'ctx-fold' })
+
+  const editKey = (await keysOn(ui)).find((k) => k.startsWith('edit-ctx-c')) as string
+  await ui.press({ key: editKey })
+  const field = await ui.find({ key: editKey.replace('edit-ctx-', 'ctx-edit-') })
+  expect(field).toMatchObject({ props: { value: '토스만 쓴다' } })
+  await ui.input({ key: editKey.replace('edit-ctx-', 'ctx-edit-'), text: '토스와 KCP 를 쓴다' })
+
+  // Only the request is left in the fold; the edited item is pending again
+  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 1개/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '토스와 KCP 를 쓴다' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '미반영' })).toBeDefined()
+  expect(await ui.find({ key: 'apply' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an open edit field closes on its own button or when Esc takes the keyboard', async ($, on) => {
+  await openTree($, on, [LAYER1])
+
+  let ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'ctx-fold' })
+  await ui.press({ key: 'edit-ctx-seed' })
+  expect(await ui.find({ key: 'ctx-edit-seed' })).toBeDefined()
+  await ui.press({ key: 'close-ctx-seed' })
+  expect(await ui.find({ key: 'ctx-edit-seed' })).toBeUndefined()
+
+  // Esc hands the keyboard back to the prompt, and the pane drawn without it
+  // has the field put away, as the add field is
+  await ui.press({ key: 'edit-ctx-seed' })
+  await ui.unmount()
+  ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: false } })
+  expect(await ui.find({ key: 'ctx-edit-seed' })).toBeUndefined()
+  expect(await ui.find({ key: 'edit-ctx-seed' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('rewriting the request brings up apply and is sent as the new starting point', async ($, on) => {
+  const revised = JSON.stringify({ nodes: [], revisit: [], drop: [] })
+  const seen = await openTree($, on, [LAYER1, revised])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'ctx-fold' })
+  await ui.press({ key: 'edit-ctx-seed' })
+  await ui.input({ key: 'ctx-edit-seed', text: '세션 로그를 S3 에 보관하고 싶다' })
+  // The request cannot be removed, only rewritten
+  expect(await ui.find({ key: 'rm-ctx-seed' })).toBeUndefined()
+  expect(await ui.find({ key: 'apply' })).toBeDefined()
+
+  await ui.press({ key: 'apply' })
+  expect(seen.prompts[1]).toContain('[prompts/tree.md]')
+  expect(seen.prompts[1]).toContain('세션 로그를 S3 에 보관하고 싶다')
+  expect(await ui.find({ key: 'apply' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('removing an applied item keeps the tree but asks for a re-apply', async ($, on) => {
+  const revised = JSON.stringify({ nodes: [], revisit: [], drop: [] })
+  const seen = await openTree($, on, [LAYER1, revised])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  await ui.press({ key: 'apply' })
+  const before = seen.calls
+  await ui.press({ key: 'ctx-fold' })
+
+  const removeKey = (await keysOn(ui)).find((k) => k.startsWith('rm-ctx-c')) as string
+  await ui.press({ key: removeKey })
+  // Nothing was recomputed; the button is what says the tree is behind
+  expect(seen.calls).toBe(before)
+  expect(await ui.find({ type: 'Text', text: '토스만 쓴다' })).toBeUndefined()
+  expect(await ui.find({ key: 'apply' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a failed apply keeps the tree and the badges, and offers to try again', async ($, on) => {
+  const seen = await openTree($, on, [LAYER1, 'not json'])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  await ui.press({ key: 'apply' })
+
+  expect(seen.calls).toBe(2)
+  // The layer on screen is the one from before, and the item is still pending
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '미반영' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /JSON 을 읽지 못했습니다/ })).toBeDefined()
+  expect(await ui.find({ key: 'apply', text: '컨텍스트 반영 다시 시도 (m)' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('nothing in the context can be touched while an apply is out', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  let release: (() => void) | null = null
+  let calls = 0
+  on('model.fork', async () => {
+    calls += 1
+    if (calls === 1) return { value: { isAnswered: true, text: LAYER1 } }
+    await new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return { value: { isAnswered: true, text: DONE } }
+  })
+  await $.command.run({ command: 'tree', args: SEED })
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  const pending = ui.press({ key: 'apply' })
+
+  expect(await ui.find({ key: 'add-ctx' })).toBeUndefined()
+  expect(await ui.find({ key: 'apply' })).toBeUndefined()
+  expect((await keysOn(ui)).some((k) => k.startsWith('edit-ctx-') || k.startsWith('rm-ctx-'))).toBe(false)
+
+  if (release) (release as () => void)()
+  await pending
+  expect(await ui.find({ key: 'add-ctx' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the fold stays shut once the next round reads a pending item', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'ctx-fold' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+  // The round read it, so it is applied and the fold closed over it again
+  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 2개' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '토스만 쓴다' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a prompt is tree.md with the state stacked below it', async ($, on) => {
+  const seen = await openTree($, on, [LAYER1, LAYER2])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-feed' })
+  await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+
+  const order = (text: string, parts: string[]) => parts.map((p) => text.indexOf(p))
+  // The first call: no tree yet, so that section is simply absent
+  const firstAt = order(seen.prompts[0], ['[prompts/tree.md]', '## 요구', '## 출력 언어'])
+  expect(firstAt.every((at, i) => at > -1 && (i === 0 || at > firstAt[i - 1]))).toBe(true)
+  expect(seen.prompts[0]).not.toContain('## 지금까지의 트리')
+  // The next call stacks the tree and where the interview stands
+  const nextAt = order(seen.prompts[1], [
+    '[prompts/tree.md]',
+    '## 요구',
+    '## 지금까지의 트리',
+    '## 진행 상황',
+    '## 원하는 결과',
+    '## 출력 언어',
+  ])
+  expect(nextAt.every((at, i) => at > -1 && (i === 0 || at > nextAt[i - 1]))).toBe(true)
+  expect(seen.prompts[1]).toContain('- 배포 없이 되돌릴 수 있어야 한다')
+  await ui.unmount()
+})
+
+test('a prompt file that will not load says so instead of hanging', async ($, on) => {
+  // No answer for fs.read at all: the read rejects, as a missing file would
+  on('command.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.command.run({ command: 'tree', args: SEED })
+
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /트리를 세우다 끊겼습니다 — .*fs\.read/ })).toBeDefined()
+  expect(await ui.find({ key: 'apply' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a request with nothing worth asking can be handed over at once', async ($, on) => {
+  const submitted: string[] = []
+  on('ui.close', () => ({ value: undefined }))
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await openTree($, on, [DONE])
+
+  const ui = await $.ui.mount(PANE)
+  // No line says the interview is over: the lit hand-over button is the whole message
+  expect(await ui.find({ type: 'Text', text: /물어볼 것이 끝났습니다/ })).toBeUndefined()
+  expect(await ui.find({ key: 'handoff' })).toMatchObject({ props: { variant: 'primary' } })
+  await ui.press({ key: 'handoff', text: 'Claude에 넘기고 종료하기 (r)' })
+  expect(submitted[0]).toContain(SEED)
+  expect(submitted[0]).not.toContain('## 확정된 결정')
+  await ui.unmount()
+})
+
+test('the interview stops after four rounds, whatever the model wants', async ($, on) => {
+  // The model would keep asking forever; the pane stops calling it
+  const round = (id: string) =>
+    JSON.stringify({
+      nodes: [{ id, title: id, tag: '파생', question: '?', options: [{ id: 'o1', label: '예 (추천)', detail: '' }] }],
+      revisit: [],
+    })
+  const seen = await openTree($, on, [LAYER1, round('r2'), round('r3'), round('r4'), round('r5')])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'auto' })
+  for (let i = 0; i < 5; i += 1) {
+    if (!(await ui.find({ key: 'submit' }))) break
+    await ui.press({ key: 'submit' })
+  }
+  expect(seen.calls).toBe(4)
+  // The brake is a rule in tree.md, read off this number — not a branch here
+  expect(seen.prompts[1]).toContain('만들 레이어: 2')
+  expect(seen.prompts[2]).toContain('만들 레이어: 3')
+  expect(await ui.find({ key: 'handoff', text: 'Claude에 넘기고 종료하기 (r)' })).toBeDefined()
+  await ui.unmount()
+})
+
+// A layer that asks one thing, settles one without asking, and flags what it added
+const WITH_ASSUMED = JSON.stringify({
+  nodes: [
+    {
+      id: 'n1',
+      title: '저장 방식',
+      tag: '저장소.생성 칸 비었음',
+      question: '무엇에 보관할 것인가?',
+      isExpansion: true,
+      options: [{ id: 'o1', label: 'SQLite (추천)', detail: '한 파일로 끝난다' }],
+    },
+  ],
+  assumed: [{ title: '파일 위치', answer: '~/.tree/logs', why: '기존 설정 폴더 관례' }],
+  revisit: [],
+  drop: [],
+})
+
+test('a decision settled without asking is shown, and can still be asked', async ($, on) => {
+  await openTree($, on, [WITH_ASSUMED])
+
+  const ui = await $.ui.mount(PANE)
+  // Shown under the questions, not counted among them
+  // No title of its own: each row opens with `Pass` in green, as a settled thing
+  expect(await ui.find({ type: 'Text', text: /질문 없이 정함/ })).toBeUndefined()
+  const mark = textsIn(await ui.find({ key: 'assumed-L1a1' }))[0]
+  expect(String((mark.children || [])[0])).toBe('Pass')
+  expect(mark).toMatchObject({ props: { color: 'success', bold: true } })
+  // The first row sits right under the heading's air
+  expect(await ui.find({ key: 'assumed-L1a1' })).toMatchObject({ props: { marginTop: 0 } })
+  // Its title bold, its answer plain, the row hung in under the heading
+  expect(await ui.find({ type: 'Text', text: '파일 위치' })).toMatchObject({ props: { bold: true } })
+  expect(await ui.find({ type: 'Text', text: '~/.tree/logs' })).toBeDefined()
+  expect(await ui.find({ key: 'submit', text: /0\/1/ })).toBeDefined()
+  // The model's own additions carry a mark beside their title
+  expect(await ui.find({ type: 'Text', text: '확장' })).toBeDefined()
+
+  // It sits above the questions, under the heading, so it is read first
+  const rows = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
+  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
+  expect(at('assumed-L1a1')).toBe(at('treebar') + 1)
+  expect(at('row-n1')).toBeGreaterThan(at('assumed-L1a1'))
+  expect(at('actionbar')).toBeGreaterThan(at('row-n1'))
+
+  // Asking it puts it on the open layer, its default as the recommendation,
+  // in the warning color — a direction stands, so it is not an open red
+  await ui.press({ key: 'ask-L1a1' })
+  expect(await ui.find({ key: 'node-L1a1' })).toBeDefined()
+  const titleRow = await ui.find({ key: 'row-L1a1' })
+  expect(textsIn(titleRow).find((t) => String((t.children || [])[0]) === '●')).toMatchObject({ props: { color: 'warning' } })
+  expect(await zoneCount(ui, 'gray')).toBe(1)
+  // And it is listed before the red ones: green, yellow, red, top to bottom
+  const after = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
+  const atAfter = (key: string) => after.findIndex((r) => r.props && r.props.key === key)
+  expect(atAfter('row-L1a1')).toBeLessThan(atAfter('row-n1'))
+  expect(await ui.find({ key: 'opt-L1a1-o1', text: '~/.tree/logs' })).toBeDefined()
+  expect(await ui.find({ key: 'submit', text: /0\/2/ })).toBeDefined()
+  expect(await ui.find({ key: 'assumed-L1a1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('what was settled without asking reaches the handoff with its grounds', async ($, on) => {
+  const submitted: string[] = []
+  on('ui.close', () => ({ value: undefined }))
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await openTree($, on, [WITH_ASSUMED, DONE])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+  await ui.press({ key: 'handoff' })
+  expect(submitted[0]).toContain('파일 위치 → ~/.tree/logs')
+  expect(submitted[0]).toContain('질문 없이 정했다. 근거: 기존 설정 폴더 관례')
+  expect(submitted[0]).not.toContain('사용자가 선택지 대신 직접 적은 답이다')
+  await ui.unmount()
+})
+
+test('a struck decision takes its subtree with it', async ($, on) => {
+  // Layer 2 grows a child of n1; layer 3 strikes n1, and the child goes too
+  const child = JSON.stringify({
+    nodes: [
+      {
+        id: 'c1',
+        title: 'SQLite 저널 모드',
+        tag: 'n1 확정에서 파생',
+        question: '어느 모드?',
+        parent: 'n1',
+        options: [{ id: 'o1', label: 'WAL (추천)', detail: '' }],
+      },
+    ],
+    revisit: [],
+    drop: [],
+  })
+  const strike = JSON.stringify({ nodes: [], revisit: [], drop: ['n1'] })
+  const seen = await openTree($, on, [LAYER1, child, strike])
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+  // The child names its parent when the tree rides along
+  await ui.press({ key: 'submit' })
+  expect(seen.prompts[2]).toContain('c1 [L2/known] SQLite 저널 모드 확정="WAL"')
+  expect(seen.prompts[2]).toContain('^n1')
+  // n1 struck, c1 with it: two of the three settled are gone
+  expect(await zoneCount(ui, 'known')).toBe(1)
+  expect(await zoneCount(ui, 'deferred')).toBe(2)
+  await ui.unmount()
+})
+
+test('the summary meter splits its width by the traffic light', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+
+  const ui = await $.ui.mount(TALL)
+  const COLOR: Record<string, string> = { known: 'success', gray: 'warning', unknown: 'error', deferred: 'inactive' }
+  const widthOf = async (zone: string) => {
+    const seg = textsIn(await ui.find({ key: 'meter' })).find((t) => t.props && t.props.color === COLOR[zone])
+    return seg ? String((seg.children || [])[0]).length : 0
+  }
+  // Two open questions fill the meter in the open color; the meter shares the
+  // row with the tree and the legend, so it is the rest of the card's width
+  const meterW = await widthOf('unknown')
+  expect(meterW).toBe(30)
+  expect(await ui.find({ type: 'Text', text: '1단계' })).toMatchObject({ props: { bold: true } })
+
+  await ui.press({ key: 'opt-n1-o1' })
+  await ui.press({ key: 'submit' })
+  // One settled, one held, one new: thirds that still add up to the whole width
+  const parts = [await widthOf('known'), await widthOf('deferred'), await widthOf('unknown')]
+  expect(parts.every((w) => w >= 8)).toBe(true)
+  expect(parts.reduce((a, b) => a + b, 0)).toBe(meterW)
+  // A zone with nothing in it takes no room at all
+  expect(await widthOf('gray')).toBe(0)
+  expect(await zoneCount(ui, 'gray')).toBe(0)
+  await ui.unmount()
+})
+
+// The leaves on the summary card's tree
+const leavesIn = async (ui: any) =>
+  textsIn(await ui.find({ key: 'tree' })).filter((t) => String((t.children || [])[0]) === '●')
+
+test('the summary tree stands bare before anything is asked', async ($) => {
+  const ui = await $.ui.mount(TALL)
+  const leaves = await leavesIn(ui)
+  expect(leaves.length).toBe(35)
+  expect(leaves.every((t) => t.props && t.props.color === 'subtle')).toBe(true)
+  await ui.unmount()
+})
+
+test('the summary tree colors its leaves by the traffic light', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(TALL)
+  // Two open questions turn every leaf the open color
+  const leaves = await leavesIn(ui)
+  expect(leaves.length).toBe(35)
+  expect(leaves.every((t) => t.props && t.props.color === 'error')).toBe(true)
+  await ui.unmount()
+})
+
+test('a short pane leaves the tree out so the first question stays in view', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  // 22 rows: the ten the tree takes would push the questions below the fold
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'tree' })).toBeUndefined()
+  // The meter and legend still say where the interview stands, wider now
+  const seg = textsIn(await ui.find({ key: 'meter' })).find((t) => t.props && t.props.color === 'error')
+  expect(String((seg.children || [])[0]).length).toBe(48)
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the summary is two lines: step dots and the count, then the meter with its legend', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  const summary = await ui.find({ key: 'summary' })
+  // Border aside, the card holds the title row and the bar row, nothing else
+  expect((summary.children as unknown[]).length).toBe(2)
+  // One dot per round, the first lit on step one
+  const stepTexts = textsIn(await ui.find({ key: 'steps' }))
+  expect(stepTexts.map((t) => String((t.children || [])[0]))).toEqual(['●', '○', '○', '○'])
+  expect(stepTexts[0]).toMatchObject({ props: { color: 'claude' } })
+  expect(stepTexts[1]).toMatchObject({ props: { color: 'subtle' } })
+  // The legend is a shade and a count per zone, no words and no percentages
+  expect(await ui.find({ type: 'Text', text: /%$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '남은 단계' })).toBeUndefined()
+  expect(await zoneCount(ui, 'unknown')).toBe(2)
+
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+  const after = textsIn(await ui.find({ key: 'steps' })).map((t) => String((t.children || [])[0]))
+  expect(after).toEqual(['●', '●', '○', '○'])
+  await ui.unmount()
+})
+
+test('the fold rides on the heading and the add button sits under the rows, so an idle list is two lines', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  // Context: the request is applied and folded on the heading, so the card
+  // is its heading and the add button
+  const ctx = await ui.find({ key: 'ctxcard' })
+  const keysIn = (node: any) => (node.children as Array<{ props?: { key?: string } }>).map((r) => r.props && r.props.key)
+  expect(keysIn(ctx)).toEqual(['ctxbar', 'ctxactions'])
+  expect(await ui.find({ key: 'ctx-fold' })).toBeDefined()
+  // Feeding: nothing listed, so the heading and the add button are all there
+  // is, and the button sits right under the heading's own air
+  expect(keysIn(await ui.find({ key: 'feedcard' }))).toEqual(['feedbar', 'feedadd'])
+  expect(await ui.find({ key: 'feedadd' })).toMatchObject({ props: { marginTop: 0 } })
+  expect(await ui.find({ key: 'ctxactions' })).toMatchObject({ props: { marginTop: 0 } })
+  // With a row listed, the button stands a line off it
+  await ui.press({ key: 'add-feed' })
+  await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+  expect(await ui.find({ key: 'feedadd' })).toMatchObject({ props: { marginTop: 1 } })
+  // Rows stand a line apart from each other, the first right under the heading
+  await ui.press({ key: 'add-feed' })
+  await ui.input({ key: 'feed', text: '한글 깨짐 없음' })
+  const feedRows = ((await ui.find({ key: 'feedcard' })).children as any[]).filter(
+    (r) => r.props && String(r.props.key).startsWith('feedrow-'),
+  )
+  expect(feedRows.map((r) => r.props.marginTop)).toEqual([0, 1])
+  // The context's rows the same way
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '레거시 DB 는 못 건드린다' })
+  const ctxRows = ((await ui.find({ key: 'ctxcard' })).children as any[]).filter(
+    (r) => r.props && String(r.props.key).startsWith('ctxrow-'),
+  )
+  expect(ctxRows.map((r) => r.props.marginTop)).toEqual([0, 1])
+
+  // Opening the field puts it where the button was, right under the rows
+  await ui.press({ key: 'add-feed' })
+  const opened = keysIn(await ui.find({ key: 'feedcard' }))
+  expect(opened[0]).toBe('feedbar')
+  expect(opened.slice(1, -1).every((k) => String(k).startsWith('feedrow-'))).toBe(true)
+  expect(opened[opened.length - 1]).toBe('feedfield')
+  expect(opened).not.toContain('feedadd')
+  await ui.unmount()
+})
+
+test('a section title is set off in the heading color, with a line of air under it', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  for (const key of ['ctxbar', 'treebar', 'feedbar']) {
+    const bar = await ui.find({ key })
+    expect(bar).toMatchObject({ props: { marginBottom: 1 } })
+    // The theme's blue, not the accent the handover button has
+    expect(textsIn(bar)[0]).toMatchObject({ props: { color: 'permission', bold: true } })
+    expect(String((textsIn(bar)[0].children || [])[0]).startsWith('▍')).toBe(true)
+  }
+  await ui.unmount()
+})
+
+test('add and apply share one row under the context', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  const keysIn = (node: any) => (node.children as Array<{ props?: { key?: string } }>).map((r) => r.props && r.props.key)
+  // Nothing pending: the row is the add button alone
+  expect(keysIn(await ui.find({ key: 'ctxactions' }))).toEqual(['add-ctx'])
+
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  // A pending item brings apply up beside it, on the same row, a line off the list
+  expect(keysIn(await ui.find({ key: 'ctxactions' }))).toEqual(['add-ctx', 'apply'])
+  expect(await ui.find({ key: 'ctxactions' })).toMatchObject({ props: { marginTop: 1 } })
+  // With the field open, the button is out and apply holds the row
+  await ui.press({ key: 'add-ctx' })
+  expect(keysIn(await ui.find({ key: 'ctxactions' }))).toEqual(['apply'])
+  expect(keysIn(await ui.find({ key: 'ctxcard' }))).toContain('ctxfield')
+  await ui.unmount()
+})
+
+test('an open field keeps the list spacing: a line off the rows, none under a bare heading', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  // No rows yet: the field sits right under the heading's own air
+  await ui.press({ key: 'add-feed' })
+  expect(await ui.find({ key: 'feedfield' })).toMatchObject({ props: { marginTop: 0 } })
+  await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+  // With a row above, the field stands a line off it, as a row would
+  await ui.press({ key: 'add-feed' })
+  expect(await ui.find({ key: 'feedfield' })).toMatchObject({ props: { marginTop: 1 } })
+  await ui.unmount()
+})
+
+test('each action button carries a status color that says what the press would do', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  const colorOf = async (key: string) => textsIn(await ui.find({ key }))[0].props.color
+  // A layer with holes sends in the warning color; whole, in green
+  expect(await colorOf('submit')).toBe('warning')
+  await ui.press({ key: 'auto' })
+  expect(await colorOf('submit')).toBe('success')
+  expect(await ui.find({ key: 'submit' })).toMatchObject({ props: { variant: 'primary' } })
+  // A handover is in the accent, finished or not
+  await ui.press({ key: 'submit' })
+  expect(await colorOf('handoff')).toBe('claude')
+  // Something pending to apply is in the warning color too
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '토스만 쓴다' })
+  expect(await colorOf('apply')).toBe('warning')
+  await ui.unmount()
+})
+
+test('question titles stand a line apart, the first right under the heading', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'row-n1' })).toMatchObject({ props: { marginTop: 0 } })
+  expect(await ui.find({ key: 'row-n2' })).toMatchObject({ props: { marginTop: 1 } })
+  // The opened card sits right under its title; the next title's air sets it off
+  const rows = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
+  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
+  expect(at('card-n1')).toBe(at('row-n1') + 1)
+  expect(at('row-n2')).toBe(at('card-n1') + 1)
+  await ui.unmount()
+})
+
+test('a pick opens the next decision still waiting, and the last one stays put', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'card-n1' })).toBeDefined()
+  expect(await ui.find({ key: 'card-n2' })).toBeUndefined()
+
+  // Picking on n1 folds it and opens n2
+  await ui.press({ key: 'opt-n1-o1' })
+  expect(await ui.find({ key: 'card-n1' })).toBeUndefined()
+  expect(await ui.find({ key: 'card-n2' })).toBeDefined()
+  // Picking on the last one opens nothing more; next-step lights up instead
+  await ui.press({ key: 'opt-n2-o1' })
+  expect(await ui.find({ key: 'card-n2' })).toBeDefined()
+  expect(await ui.find({ key: 'submit' })).toMatchObject({ props: { variant: 'primary' } })
+
+  // With every decision open there is nothing to move to
+  await ui.press({ key: 'expand' })
+  await ui.press({ key: 'opt-n1-o2' })
+  expect(await ui.find({ key: 'card-n1' })).toBeDefined()
+  expect(await ui.find({ key: 'card-n2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('next-step says how many it would hold', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'submit', text: '다음 단계로 (s) · 0/2 · 2개는 미룸' })).toBeDefined()
+  await ui.press({ key: 'opt-n1-o1' })
+  expect(await ui.find({ key: 'submit', text: '다음 단계로 (s) · 1/2 · 1개는 미룸' })).toBeDefined()
+  await ui.press({ key: 'opt-n2-o1' })
+  expect(await ui.find({ key: 'submit', text: '다음 단계로 (s) · 2/2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('write-in and look-in-the-code share one line, with letters for keys one at a time', async ($, on) => {
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'open-write-n1' })).toMatchObject({ props: { hotkey: 'w', plain: true } })
+  expect(await ui.find({ key: 'probe-n1' })).toMatchObject({ props: { hotkey: 'f', plain: true } })
+  // Opening the field turns the button into the way out
+  await ui.press({ key: 'open-write-n1' })
+  expect(await ui.find({ key: 'open-write-n1', text: '닫기' })).toBeDefined()
+  await ui.press({ key: 'open-write-n1' })
+  expect(await ui.find({ key: 'write-n1' })).toBeUndefined()
+  // With every decision open the letters would collide, so they are dropped
+  await ui.press({ key: 'expand' })
+  expect((await ui.find({ key: 'open-write-n1' })).props.hotkey).toBeUndefined()
+  expect((await ui.find({ key: 'probe-n2' })).props.hotkey).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a decision under research says so on its title, and names itself in the notice', async ($, on) => {
+  on('agent.spawn', () => ({ model: 'claude-test', agentId: 'a1' }))
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'probe-n1' })
+  expect(await ui.find({ type: 'Text', text: '조사 중' })).toMatchObject({ props: { color: 'warning' } })
+  expect(await ui.find({ type: 'Text', text: /'저장 방식' 조사를 띄웠습니다/ })).toBeDefined()
+  // A second agent is not offered for the same decision; the other is untouched
+  expect(await ui.find({ key: 'probe-n1' })).toBeUndefined()
+  await ui.press({ key: 'node-n2' })
+  expect(await ui.find({ key: 'probe-n2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the hint line says the keys that work now, and carries the language button', async ($, on) => {
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  const hintText = async () => String((textsIn(await ui.find({ key: 'hint' }))[0].children || [])[0])
+  // Digits are live with one decision open
+  expect(await hintText()).toBe('Tab 이동 · Enter 선택 · Esc 프롬프트로 · 숫자 키로 선택')
+  expect(await ui.find({ key: 'viewbar' })).toBeDefined()
+  expect(textsIn(await ui.find({ key: 'viewbar' })).some((t) => String((t.children || [])[0]) === 'EN')).toBe(false)
+  expect(await ui.find({ key: 'lang' })).toBeDefined()
+  // Not with every decision open
+  await ui.press({ key: 'expand' })
+  expect(await hintText()).toBe('Tab 이동 · Enter 선택 · Esc 프롬프트로')
+  // In a field, only the keys that close it
+  await ui.press({ key: 'add-ctx' })
+  expect(await hintText()).toBe('Enter 저장 · Esc 닫기')
+  await ui.unmount()
+})
+
+test('an answer written in shows on the open card with the same tick as a pick', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'written-n1' })).toBeUndefined()
+
+  await ui.press({ key: 'open-write-n1' })
+  await ui.input({ key: 'write-n1', text: 'Postgres 테이블 추가' })
+  const row = await ui.find({ key: 'written-n1' })
+  expect(row).toBeDefined()
+  expect(textsIn(row)[0]).toMatchObject({ props: { color: 'success', bold: true } })
+  expect(await ui.find({ type: 'Text', text: '직접 입력 · Postgres 테이블 추가' })).toBeDefined()
+  // Picking a listed choice afterwards takes the row away again
+  await ui.press({ key: 'opt-n1-o2' })
+  expect(await ui.find({ key: 'written-n1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('earlier rounds are listed as Pass rows above the questions, and can be asked again', async ($, on) => {
+  await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  // Nothing has been settled or held yet, so nothing is listed
+  expect(await ui.find({ key: 'past-n1' })).toBeUndefined()
+
+  await ui.press({ key: 'opt-n1-o1' })
+  await ui.press({ key: 'submit' })
+  // The settled one opens with a green Pass, the held one with the held word, dim
+  const settled = textsIn(await ui.find({ key: 'past-n1' })).map((t) => [String((t.children || [])[0]), t.props])
+  expect(settled[0][0]).toBe('Pass')
+  expect(settled[0][1]).toMatchObject({ color: 'success', bold: true })
+  expect(settled.map((s) => s[0])).toContain('SQLite')
+  const held = textsIn(await ui.find({ key: 'past-n2' })).map((t) => [String((t.children || [])[0]), t.props])
+  expect(held[0][0]).toBe('미룸')
+  expect(held[0][1]).toMatchObject({ color: 'inactive' })
+  expect(held.map((s) => s[0])).not.toContain('→')
+
+  // Both sit above the new question, under the heading; the actions close the card
+  const rows = (await ui.find({ key: 'treecard' })).children as Array<{ props?: { key?: string } }>
+  const at = (key: string) => rows.findIndex((r) => r.props && r.props.key === key)
+  expect(at('past-n1')).toBe(at('treebar') + 1)
+  expect(at('past-n2')).toBe(at('past-n1') + 1)
+  expect(await ui.find({ key: 'past-n2' })).toMatchObject({ props: { marginTop: 1 } })
+  expect(at('row-n3')).toBeGreaterThan(at('past-n2'))
+  expect(at('actionbar')).toBeGreaterThan(at('row-n3'))
+
+  // The held decision comes back onto the open layer, beside the new one
+  await ui.press({ key: 'reask-n2' })
+  expect(await ui.find({ key: 'node-n2' })).toBeDefined()
+  expect(await ui.find({ key: 'node-n3' })).toBeDefined()
+  expect(await ui.find({ key: 'submit', text: /0\/2/ })).toBeDefined()
+  expect(await zoneCount(ui, 'deferred')).toBe(0)
+  await ui.unmount()
+})
+
+test('a criterion can be edited in place, the way a context row can', async ($, on) => {
+  const submitted: string[] = []
+  on('ui.close', () => ({ value: undefined }))
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await openTree($, on, [LAYER1, DONE])
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-feed' })
+  await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+  const [row] = (await ui.find({ key: 'feedcard' })).children.filter((r: any) => String(r.props?.key).startsWith('feedrow-'))
+  const id = String(row.props.key).replace('feedrow-', '')
+
+  // The edit button opens a field holding the row's text, in the row's place
+  await ui.press({ key: 'edit-feed-' + id })
+  expect(await ui.find({ key: 'feed-edit-' + id })).toMatchObject({ props: { value: '배포 없이 되돌릴 수 있어야 한다', autoFocus: true } })
+  await ui.input({ key: 'feed-edit-' + id, text: '배포 없이 되돌릴 수 있고, 한글이 깨지지 않아야 한다' })
+  // Saved: the row shows the new text, the field is gone, and the handoff carries it
+  expect(await ui.find({ key: 'feed-edit-' + id })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '배포 없이 되돌릴 수 있고, 한글이 깨지지 않아야 한다' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '배포 없이 되돌릴 수 있어야 한다' })).toBeUndefined()
+  // The close button puts an open field away without saving
+  await ui.press({ key: 'edit-feed-' + id })
+  await ui.press({ key: 'close-feed-' + id })
+  expect(await ui.find({ key: 'feed-edit-' + id })).toBeUndefined()
+
+  await ui.press({ key: 'auto' })
+  await ui.press({ key: 'submit' })
+  await ui.press({ key: 'handoff' })
+  expect(submitted[0]).toContain('- [ ] 배포 없이 되돌릴 수 있고, 한글이 깨지지 않아야 한다')
+  await ui.unmount()
+})
+
+test('a new /tree starts clean: the last interview\'s context and criteria do not ride along', async ($, on) => {
+  const seen = await openTree($, on, [LAYER1, LAYER2])
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '결제사는 토스만 쓴다' })
+  await ui.press({ key: 'add-feed' })
+  await ui.input({ key: 'feed', text: '배포 없이 되돌릴 수 있어야 한다' })
+
+  await $.command.run({ command: 'tree', args: '알림 발송 채널을 정하고 싶다' })
+  // The first layer of the new tree is asked for without the old premises
+  expect(seen.prompts[1]).toContain('알림 발송 채널을 정하고 싶다')
+  expect(seen.prompts[1]).not.toContain('결제사는 토스만 쓴다')
+  expect(seen.prompts[1]).not.toContain('배포 없이 되돌릴 수 있어야 한다')
+  expect(await ui.find({ type: 'Text', text: '결제사는 토스만 쓴다' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '배포 없이 되돌릴 수 있어야 한다' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '1단계' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('stopping the wait on the first layer offers try again, and the late reply is thrown away', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  let release: (() => void) | null = null
+  let calls = 0
+  on('model.fork', async () => {
+    calls += 1
+    // The first call hangs until the test lets it go; the retry answers at once
+    if (calls === 1) {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+    }
+    return { value: { isAnswered: true, text: LAYER1 } }
+  })
+
+  const run = $.command.run({ command: 'tree', args: SEED })
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'cancel' })).toBeDefined()
+  await ui.press({ key: 'cancel' })
+  // No tree stands yet, and still the pane offers to try again
+  expect(await ui.find({ key: 'retry' })).toBeDefined()
+
+  // The stopped call comes back: its layer must not appear out of nowhere
+  if (release) (release as () => void)()
+  await run
+  expect(await ui.find({ key: 'node-n1' })).toBeUndefined()
+  expect(await ui.find({ key: 'retry' })).toBeDefined()
+
+  await ui.press({ key: 'retry' })
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  expect(calls).toBe(2)
   await ui.unmount()
 })
