@@ -7,7 +7,7 @@ A decision-tree interview for Claude Code, in a pane.
 ![Claude Code mod](https://img.shields.io/badge/Claude%20Code-mod-black)
 ![Requires 2.1.287+](https://img.shields.io/badge/requires-2.1.287%2B-blue)
 ![Terminal and Desktop](https://img.shields.io/badge/surface-terminal%20%7C%20desktop-lightgrey)
-![81 tests](https://img.shields.io/badge/tests-81%20passing-brightgreen)
+![89 tests](https://img.shields.io/badge/tests-89%20passing-brightgreen)
 
 - [Why tree](#why-tree)
 - [How it works](#how-it-works)
@@ -50,7 +50,7 @@ on each other, so they can be laid out together and answered in any order.
 ```
 /tree <one line about what to decide>
    │
-   ├─ one model call ─────────────► layer 1
+   ├─ check agent → one model call ► layer 1
    │
    ▼
 ┌─────────────────────────────────────────────┐
@@ -100,7 +100,15 @@ Then, in the session:
 /tree add a payments integration
 ```
 
-Leave the argument off and it takes your last prompt as the seed.
+The pane comes with the mod: it is up when a session starts or when tree is
+turned on in `/plugin`, and gone when the mod is turned off. With no tree yet
+the pane comes up bare with a field: type what to decide there and Enter
+builds the first step.
+
+A bare `/tree` (the command menu's tree does the same) only shows or hides the
+pane: open, it closes; closed, it brings the tree back where it was. A pane put
+away with `q`, its × or ctrl+x x stays away through that session's reloads;
+`/tree` brings it back.
 
 To keep it around, add the directory as a marketplace and install it as a
 plugin, the same as any other Claude Code plugin.
@@ -119,15 +127,32 @@ a choice as `1: label`, an action as `[ label ]`, the traffic light and the
 badges in the theme's status colors. Only the one button to press next is
 highlighted, and a line at the bottom says which keys work **right now** —
 only `c` while a call is out, Enter and Esc while a field is open, otherwise
-Tab, Enter, Esc and the digits. The language button sits at its end.
+Tab, Enter, Esc and the digits.
+
+The pane wears a frame of its own, so it is told from the transcript beside it
+at a glance. Its first row is a title band — ` TREE ` in a block of the accent,
+`decision-tree interview` beside it, the language button `l: KO` and `q: ×close`
+at the right edge — with a rule under it. Docked (144+ columns) the whole body
+sits in a bold border in the accent; inline, the host already draws a border,
+so only the band is drawn.
+
+```
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  TREE  decision-tree interview            l: KO q: ×close ┃
+┃ ────────────────────────────────────────────────────────── ┃
+┃                                                            ┃
+┃ ╭────────────────────────────────────────────────────────╮ ┃
+┃ │ ●●○○ step 2                               1 of 3 picked │ ┃
+┃ ╰────────────────────────────────────────────────────────╯ ┃
+```
 
 Each section sits in a rounded card, the way `/context` draws its own. A
 card's title is set in the theme's blue, bold, behind a bar — `▍Questions (tree)` —
-with a line of air under it to keep it off the content. The card on top,
-**◆ tree**, is two lines:
+with a line of air under it to keep it off the content. The summary card on
+top is two lines:
 
 ```
-│ ◆ tree  ●●○○ step 2                       1 of 3 picked │
+│ ●●○○ step 2                               1 of 3 picked │
 │ ████▓▓░░░░░░░░░░░░▒▒                  █ 2  ▓ 1  ░ 4  ▒ 1 │
 ```
 
@@ -192,6 +217,14 @@ below it holds the things no choice covers — a constraint, a premise,
 something you would simply have said in a chat.
 
 > We are locked into one payment provider.
+
+**The request is checked first.** The way grill-me looks at the code before
+it asks, the sentence after `/tree` goes as written to an agent with tools. It
+reads the memos, docs, issues and code the request points at, and reports what
+holds, what does not match, and what only you can answer. That report joins the
+context as a `checked: the request` row, and the first layer stands on it. If
+the check fails, no tree is guessed: the pane says why. A link you add to the
+context yourself is read when the context is applied, as a `read: <link>` row.
 
 Every row carries a `pending` or `applied` badge. While anything is pending,
 **apply context** appears beside `[ + add ]`. Press it and the open layer is rebuilt on the
@@ -269,6 +302,9 @@ cache and only the compact tree snapshot is new. A fork needs the main thread
 to have answered at least once, which `/tree` has not, so the first call falls
 back to a completion carrying the recent messages itself.
 
+One check agent runs ahead of the first layer, and costs as much time and
+tokens as reading what the request points at takes.
+
 Picking choices is free. Nothing is sent until you press next.
 
 ## Language
@@ -290,7 +326,7 @@ outlive the session.
 
 ```bash
 claude plugin validate ./tree   # hooks and calls the mod makes
-cd tree && claude plugin test   # 81 tests, no session or network needed
+cd tree && claude plugin test   # 90 tests, no session or network needed
 bun evals/depth.ts --runs 3     # real model: right depth, and only the user's own questions
 ```
 

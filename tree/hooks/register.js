@@ -40,6 +40,9 @@ const view = atom(
     writing: null,
     // the decisions a research agent has been sent at
     probing: [],
+    // the person put the pane away (q, ×, ctrl+x x, a bare /tree): it stays
+    // away through reloads until a bare /tree brings it back
+    hidden: false,
   },
 )
 
@@ -49,6 +52,8 @@ const PACKS = {
   ko: {
     name: '한국어',
     other: 'EN',
+    close: '×닫기',
+    panelTag: '결정 트리 인터뷰',
     tree: '질문',
     treeTag: '(tree)',
     feeding: '원하는 결과',
@@ -82,7 +87,19 @@ const PACKS = {
     nextLayerBusy: '다음 단계를 계산하는 중',
     spawning: '조사 에이전트를 띄우는 중',
     spawned: (title) => "'" + title + "' 조사를 띄웠습니다 — 결과는 대화 쪽으로 돌아옵니다.",
-    noSeed: 'tree: 무엇을 정할지 한 줄 적어주세요. 예: /tree 결제 연동 붙이고 싶다',
+    readingRefs: (n) => '링크 ' + n + '개를 읽는 중',
+    readRow: (ref) => '읽음: ' + ref,
+    surveyBusy: '요구를 검증하는 중',
+    surveyRow: '검증: 요구',
+    failedSurvey: (why) => '요구를 검증하지 못했습니다 — ' + why,
+    readNoAgent: '읽을 에이전트가 시작되지 않았습니다',
+    readNoAnswer: (reason) => '읽던 에이전트가 답 없이 끝났습니다 (' + reason + ')',
+    readUnread: (refs) => '읽지 못했습니다: ' + refs.join(', '),
+    failedRead: (why) => why + ' — 내용을 컨텍스트에 직접 적어도 됩니다.',
+    seedAsk: '무엇을 정할지 한 줄 적으면 첫 단계를 세웁니다',
+    seedLabel: '요구',
+    seedPlaceholder: '예: 결제 연동 붙이고 싶다',
+    seedSubmit: '시작',
     failedFirst: (why) => '트리를 세우지 못했습니다 — ' + why,
     failedFirstThrow: (why) => '트리를 세우다 끊겼습니다 — ' + why,
     failedNext: (why) => '다음 단계를 받지 못했습니다 — ' + why,
@@ -100,7 +117,7 @@ const PACKS = {
     applyContext: '컨텍스트 반영 (m)',
     applyRetry: '컨텍스트 반영 다시 시도 (m)',
     applyBusy: '컨텍스트를 트리에 반영하는 중',
-    commandDescription: '결정 트리를 열고 단계별로 인터뷰한다',
+    commandDescription: '결정 트리를 열고 단계별로 인터뷰한다. 인자 없이 치면 창을 켜고 끈다',
     commandHint: '[무엇을 정할지]',
     replyLanguage: '노드의 title, question, tag 와 선택지의 label, detail 은 모두 한국어로 써라.',
     hoTitle: '# 작업 지시',
@@ -145,6 +162,8 @@ const PACKS = {
   en: {
     name: 'English',
     other: '한국어',
+    close: '×close',
+    panelTag: 'decision-tree interview',
     tree: 'Questions',
     treeTag: '(tree)',
     feeding: 'Desired outcome',
@@ -178,7 +197,19 @@ const PACKS = {
     nextLayerBusy: 'working out the next step',
     spawning: 'starting a research agent',
     spawned: (title) => "A research agent is on '" + title + "' — its findings come back in the conversation.",
-    noSeed: 'tree: write one line about what to decide, e.g. /tree add a payments integration',
+    readingRefs: (n) => 'reading ' + n + (n === 1 ? ' link' : ' links'),
+    readRow: (ref) => 'read: ' + ref,
+    surveyBusy: 'checking the request',
+    surveyRow: 'checked: the request',
+    failedSurvey: (why) => 'could not check the request — ' + why,
+    readNoAgent: 'no agent started to do the reading',
+    readNoAnswer: (reason) => 'the agent doing the reading ended without an answer (' + reason + ')',
+    readUnread: (refs) => 'could not read: ' + refs.join(', '),
+    failedRead: (why) => why + ' — you can also paste what it says into the context.',
+    seedAsk: 'Write one line about what to decide and the first step is built',
+    seedLabel: 'request',
+    seedPlaceholder: 'e.g. add a payments integration',
+    seedSubmit: 'start',
     failedFirst: (why) => 'Could not build the tree — ' + why,
     failedFirstThrow: (why) => 'Building the tree was cut short — ' + why,
     failedNext: (why) => 'No next step came back — ' + why,
@@ -196,7 +227,7 @@ const PACKS = {
     applyContext: 'apply context (m)',
     applyRetry: 'apply context again (m)',
     applyBusy: 'folding the context into the tree',
-    commandDescription: 'Open the decision tree and interview yourself through it',
+    commandDescription: 'Open the decision tree and interview yourself through it; bare, it shows or hides the pane',
     commandHint: '[what you want to decide]',
     replyLanguage: 'Write every title, question, tag, option label and detail in English.',
     hoTitle: '# Work order',
@@ -369,7 +400,10 @@ const section = {
   feeding: (feeds) => ({ title: '원하는 결과', body: feeds.map((f) => '- ' + f.text).join('\n') }),
   context: (items) => ({
     title: '컨텍스트',
-    body: items.map((m) => '- [' + (m.applied ? '반영됨' : '미반영') + '] ' + m.text).join('\n'),
+    // A row that was read off a link carries what the link said under it
+    body: items
+      .map((m) => '- [' + (m.applied ? '반영됨' : '미반영') + '] ' + m.text + (m.body ? '\n' + indent(m.body) : ''))
+      .join('\n'),
   }),
   language: (lang) => ({ title: '출력 언어', body: pack(lang).replyLanguage }),
 }
@@ -402,7 +436,7 @@ function handoffText(list, feeds, items, seedText, lang) {
 
   if (items.length) {
     lines.push('', L.hoPremise)
-    for (const m of items) lines.push('- ' + m.text)
+    for (const m of items) lines.push('- ' + m.text + (m.body ? '\n' + indent(m.body) : ''))
   }
 
   if (settled.length) {
@@ -442,6 +476,13 @@ function handoffText(list, feeds, items, seedText, lang) {
   return lines.join('\n')
 }
 
+function indent(text) {
+  return String(text)
+    .split('\n')
+    .map((line) => '  ' + line)
+    .join('\n')
+}
+
 function clip(text, width) {
   if (width <= 0 || text.length <= width) return text
   return text.slice(0, Math.max(1, width - 1)) + '…'
@@ -476,6 +517,9 @@ const ZONE_SHADE = { known: '█', gray: '▓', unknown: '░', deferred: '▒' 
 // The section titles' color: the theme's blue, the one its own dialogs ask
 // in — off the traffic light, and off the accent the handover button has
 const HEADING_COLOR = 'permission'
+// The panel's own frame and title band: the accent, so the pane is told from
+// the transcript beside it at a glance, and from the dim cards inside it
+const PANEL_COLOR = 'claude'
 
 // The most rounds one interview runs before it hands over
 const MAX_LAYERS = 4
@@ -546,6 +590,146 @@ async function settleContext($, sent) {
   }))
 }
 
+// The links in a request or a context row. The model that builds a layer has
+// no tools, so a link it is handed is a line it cannot read: what it points
+// at has to be fetched first and laid beside it as context.
+function findRefs(text) {
+  const found = []
+  for (const hit of String(text || '').matchAll(/https?:\/\/[^\s<>()[\]"']+/g)) {
+    const ref = hit[0].replace(/[.,;:!?]+$/, '')
+    if (!found.includes(ref)) found.push(ref)
+  }
+  return found
+}
+
+// The agent sent to read links, while one is out: its id when core gave one,
+// and what resolves once its turn.complete lands. One at a time: a newer call
+// moves the generation on, and the older reader's answer is thrown away.
+let reader = null
+
+// The context row the request's check came back as
+const SURVEY = 'survey'
+
+// Split the agent's answer into one body per link: the sections it was told
+// to head with the link, or the whole answer when it headed nothing
+function bodiesByRef(answer, refs) {
+  const parts = String(answer || '').split(/^###\s+/m).slice(1)
+  const out = {}
+  for (const part of parts) {
+    const nl = part.indexOf('\n')
+    const head = (nl === -1 ? part : part.slice(0, nl)).trim()
+    const body = (nl === -1 ? '' : part.slice(nl + 1)).trim()
+    const ref = refs.find((r) => head.includes(r))
+    if (ref && !out[ref]) out[ref] = body
+  }
+  for (const ref of refs) {
+    if (!out[ref]) out[ref] = refs.length === 1 && !parts.length ? String(answer || '').trim() : ''
+  }
+  return out
+}
+
+// One general-purpose agent, waited on until its turn.complete lands. The wait
+// is set before the spawn, so an answer that comes back while the spawn is
+// still resolving is not lost
+async function runAgent($, gen, lang, description, prompt) {
+  const L = pack(lang)
+  const ended = new Promise((resolve) => {
+    reader = { agentId: null, resolve }
+  })
+  const mine = reader
+  const started = await $.agent.spawn({ subagentType: 'general-purpose', description, prompt })
+  if (!started || started.deny) {
+    if (reader === mine) reader = null
+    return { ok: false, why: L.readNoAgent + (started && started.deny ? ': ' + started.deny : '') }
+  }
+  if (reader === mine && started.agentId) mine.agentId = started.agentId
+  const done = await ended
+  if (reader === mine) reader = null
+  if (gen !== generation) return { ok: false, why: '' }
+  const answer = done && done.reason === 'answer' ? String(done.answer || '').trim() : ''
+  if (!answer) return { ok: false, why: L.readNoAnswer((done && done.reason) || 'aborted') }
+  return { ok: true, answer }
+}
+
+// The first thing a request meets, the way grill-me starts: an agent with
+// tools takes it as written, reads what it points at, and reports what holds,
+// what does not, and what only the person can say. That report is the first
+// layer's context, so the tree stands on checked ground. Done once per request.
+async function survey($, gen, lang, text) {
+  const L = pack(lang)
+  if ((await read($, context)).some((m) => m.ref === SURVEY)) return { ok: true }
+  await update($, view, (v) => ({ ...v, notice: L.surveyBusy }))
+  const got = await runAgent(
+    $,
+    gen,
+    lang,
+    '요구 검증',
+    '다음 요구를 검증하라. 요구가 가리키는 메모·문서·이슈·코드를 찾아 읽고, 아래 세 가지를 근거와 함께 ' +
+      '3000자 안으로 적는다. 아무것도 만들거나 고치지 마라.\n' +
+      '- 확인된 사실\n- 요구나 그 자료가 실제와 어긋나는 점\n- 확인하지 못해 사용자만 답할 수 있는 점\n\n' +
+      '요구:\n' +
+      text,
+  )
+  if (!got.ok) return got
+  await update($, context, (list) => [
+    ...list,
+    { id: 'v' + Date.now(), text: L.surveyRow, applied: false, ref: SURVEY, body: got.answer },
+  ])
+  return { ok: true }
+}
+
+// Read the links in applied context rows with one agent, and lay what came
+// back as context rows for the layer about to be built. A link already read
+// is skipped, and `read` says how many were fetched. Answers ok once every
+// link is in, and not ok when none could be.
+async function readTargets($, gen, lang, targets) {
+  const L = pack(lang)
+  const items = await read($, context)
+  const known = new Set(items.filter((m) => m.ref).map((m) => m.ref))
+  const wanted = []
+  for (const t of targets) {
+    if (t.target && !known.has(t.target) && !wanted.some((w) => w.target === t.target)) wanted.push(t)
+  }
+  if (!wanted.length) return { ok: true, read: 0 }
+  await update($, view, (v) => ({ ...v, notice: L.readingRefs(wanted.length) }))
+
+  const got = await runAgent(
+    $,
+    gen,
+    lang,
+    '컨텍스트의 링크 읽기',
+    '다음 항목을 알아 와서 확인된 사실만 정리해 답하라. 항목마다 적힌 방법을 따르고, 쓸 수 있는 ' +
+      '도구 가운데 맞는 것을 고른다. 항목 밖으로 넓히지 말고, 아무것도 만들거나 고치지 마라.\n\n' +
+      '답은 항목마다 `### <항목>` 제목 아래에 원문에 충실하게, 항목당 2500자 안으로 적는다. 알아오지 ' +
+      '못한 항목은 `### <항목>` 아래에 `읽지 못함: <이유>` 한 줄만 적는다. 추측으로 채우지 않는다.\n\n' +
+      wanted.map((w) => '- ' + w.target + (w.how ? ' — ' + w.how : '')).join('\n'),
+  )
+  if (!got.ok) return got
+  const answer = got.answer
+
+  const refs = wanted.map((w) => w.target)
+  const bodies = bodiesByRef(answer, refs)
+  const unread = refs.filter((r) => !bodies[r] || /^읽지 못함|^(could not|unable to) read/i.test(bodies[r]))
+  if (unread.length === refs.length) return { ok: false, why: L.readUnread(unread) }
+  const fetched = refs.filter((r) => !unread.includes(r))
+  await update($, context, (list) => [
+    ...list,
+    ...fetched.map((r, i) => ({ id: 'r' + Date.now() + '-' + i, text: L.readRow(r), applied: false, ref: r, body: bodies[r] })),
+  ])
+  return { ok: true, read: fetched.length }
+}
+
+// The links in context rows the person added and applied, not read yet.
+// The request itself is checked once by survey() before the first layer
+async function readRefs($, gen, lang) {
+  const items = await read($, context)
+  const targets = []
+  for (const m of items.filter((row) => !row.applied && !row.ref)) {
+    for (const ref of findRefs(m.text)) if (!targets.some((t) => t.target === ref)) targets.push({ target: ref, how: '' })
+  }
+  return readTargets($, gen, lang, targets)
+}
+
 // The recent conversation, written out for the calls that can't ride on a fork
 async function gatherContext($) {
   const history = await $.session.messages()
@@ -584,6 +768,23 @@ async function think($, prompt, layer, lang) {
   return { step, why: '' }
 }
 
+// One layer: the links in applied context rows are fetched first, then the
+// model is asked once and the tree stands on what there is. The request goes
+// in as written. The items the prompt was built on come back with the step, so the caller marks applied exactly what
+// was read. Resolves null once a newer call has moved the generation on.
+async function askLayer($, gen, lang, layer, notice, buildPrompt, failed) {
+  const L = pack(lang)
+  const got = await readRefs($, gen, lang)
+  if (gen !== generation) return null
+  if (!got.ok) return { step: null, items: [], message: L.failedRead(got.why) }
+  await update($, view, (v) => ({ ...v, notice }))
+  const items = await read($, context)
+  const grown = await think($, await buildPrompt(items), layer, lang)
+  if (gen !== generation) return null
+  if (!grown.step) return { step: null, items, message: failed(grown.why) }
+  return { step: grown.step, items, message: '' }
+}
+
 // Build the first layer out of the seed prompt
 async function grow($, text) {
   const lang = (await read($, view)).lang
@@ -595,14 +796,24 @@ async function grow($, text) {
   let message = ''
   let opened = null
   try {
-    const feeds = await read($, feeding)
-    const items = await read($, context)
-    const sent = contextSent(text, items)
-    const grown = await think($, treePrompt(await loadTree($), text, [], feeds, items, 1, lang), 1, lang)
+    const checked = await survey($, gen, lang, text)
     if (gen !== generation) return
+    const grown = !checked.ok
+      ? { step: null, message: L.failedSurvey(checked.why) }
+      : await askLayer(
+          $,
+          gen,
+          lang,
+          1,
+          L.firstLayerBusy,
+          async (items) => treePrompt(await loadTree($), text, [], await read($, feeding), items, 1, lang),
+          L.failedFirst,
+        )
+    if (!grown) return
     if (!grown.step) {
-      message = L.failedFirst(grown.why)
+      message = grown.message
     } else {
+      const sent = contextSent(text, grown.items)
       await update($, nodes, () => grown.step.nodes)
       opened = openIn(grown.step.nodes, 1)
       await settleContext($, sent)
@@ -676,20 +887,22 @@ async function advance($, fromLayer) {
   let moved = null
   try {
     const current = await read($, nodes)
-    const feeds = await read($, feeding)
-    const items = await read($, context)
     const seedText = await read($, seed)
-    const sent = contextSent(seedText, items)
-    const grown = await think(
+    const grown = await askLayer(
       $,
-      treePrompt(await loadTree($), seedText, current, feeds, items, fromLayer + 1, lang),
-      fromLayer + 1,
+      gen,
       lang,
+      fromLayer + 1,
+      L.nextLayerBusy,
+      async (items) =>
+        treePrompt(await loadTree($), seedText, current, await read($, feeding), items, fromLayer + 1, lang),
+      L.failedNext,
     )
-    if (gen !== generation) return
+    if (!grown) return
     if (!grown.step) {
-      message = L.failedNext(grown.why)
+      message = grown.message
     } else {
+      const sent = contextSent(seedText, grown.items)
       // A reopened node comes back into the new layer, with its answer cleared.
       // A dropped one is struck off: the premise it belonged to is gone, so it
       // keeps no answer and never reaches the handoff.
@@ -744,21 +957,22 @@ async function revise($) {
   let rebuilt = null
   try {
     const current = await read($, nodes)
-    const feeds = await read($, feeding)
-    const items = await read($, context)
-    const sent = contextSent(seedText, items)
     // The open questions of this layer are thrown away and asked for again
     const kept = current.filter((n) => !(n.layer === layer && n.zone !== 'known' && n.zone !== 'deferred'))
-    const grown = await think(
+    const grown = await askLayer(
       $,
-      treePrompt(await loadTree($), seedText, kept, feeds, items, layer, state.lang),
-      layer,
+      gen,
       state.lang,
+      layer,
+      L.applyBusy,
+      async (items) => treePrompt(await loadTree($), seedText, kept, await read($, feeding), items, layer, state.lang),
+      L.failedNext,
     )
-    if (gen !== generation) return
+    if (!grown) return
     if (!grown.step) {
-      message = L.failedNext(grown.why)
+      message = grown.message
     } else {
+      const sent = contextSent(seedText, grown.items)
       const struck = new Set(grown.step.drop)
       const reopened = new Set(grown.step.revisit)
       const carried = kept.map((n) => {
@@ -841,19 +1055,46 @@ async function handoff($) {
   $.prompt
     .submit({ text: handoffText(current, feeds, items, seedText, lang), asUser: true })
     .catch(() => {})
-  await $.ui.close({ id: PANE })
+  await hide($)
   await update($, view, (v) => ({ ...v, layer: 0, busy: false, notice: '', isComplete: false, focusId: null }))
 }
 
-// The seed is whatever came after /tree, or the last thing the user said
-async function seedFrom($, args) {
-  if (args && args.trim()) return args.trim()
-  const history = await $.session.messages()
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const row = history[i]
-    if (row && row.role === 'user' && row.text && row.text.trim()) return row.text.trim()
-  }
-  return ''
+// The pane as every opener opens it. `focus` goes to the bare pane's field
+// when the person asked for it; a pane that comes up with the session leaves
+// the keyboard at the prompt
+async function show($, focus) {
+  await update($, view, (v) => ({ ...v, hidden: false }))
+  await $.ui.open({ id: PANE, title: 'tree', focus, rows: 22 })
+}
+
+// Putting the pane away is remembered for the session, so a reload does not
+// bring it straight back; a bare /tree does
+async function hide($) {
+  await update($, view, (v) => ({ ...v, hidden: true }))
+  await $.ui.close({ id: PANE })
+}
+
+// A new request starts a new interview: what the last one gathered — its
+// tree, context, criteria and unsent picks — would otherwise ride into this
+// one's prompt as standing premises
+async function start($, text) {
+  await update($, nodes, () => [])
+  await update($, context, () => [])
+  await update($, feeding, () => [])
+  await update($, draft, () => ({}))
+  await update($, view, (v) => ({
+    ...v,
+    layer: 0,
+    isComplete: false,
+    focusId: null,
+    stale: false,
+    applyFailed: false,
+    editing: null,
+    adding: [],
+    writing: null,
+    probing: [],
+  }))
+  return grow($, text)
 }
 
 export function register(on) {
@@ -869,36 +1110,59 @@ export function register(on) {
       argumentHint: pack(lang).commandHint,
       immediate: true,
     })
+    // The pane comes up with the mod: a session's start, the mod turned on
+    // in /plugin, a reload. One that stayed up through a reload is left as it
+    // is; one the person put away stays away
+    const hidden = (await read($, view)).hidden
+    if (e.isInteractive && !hidden && !(await $.ui.panes()).some((pane) => pane.id === PANE)) {
+      await $.ui.open({ id: PANE, title: 'tree', rows: 22 })
+    }
     return next(e)
   })
 
-  // Runs when you type /tree
-  on('command.run', { command: 'tree' }, async ($, e) => {
-    const text = await seedFrom($, e.args)
+  // The engine's own close mark and ctrl+x x come through here as the
+  // person's; a pane dropped with the mod (`unload`) never does
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin && e.origin.kind === 'person') await update($, view, (v) => ({ ...v, hidden: true }))
+    return next(e)
+  })
+
+  // The agent sent to read links answers through its own turn.complete. A
+  // turn with an agentId is a subagent's, never the main loop's: it is the
+  // reader's when the id core gave the spawn matches, or when the spawn was
+  // answered by a hook and so carried none
+  on('turn.complete', ($, e, next) => {
+    if (reader && e.agentId && (!reader.agentId || reader.agentId === e.agentId)) reader.resolve(e)
+    return next(e)
+  })
+
+  // Runs when you type /tree. A hook has ten seconds; the first layer can
+  // take minutes when a reader agent goes out first, so the run answers
+  // before the budget ends and the growing goes on behind the pane, which
+  // draws from the atoms as they fill
+  on('command.run', { command: 'tree' }, async ($, e, next) => {
+    const text = e.args ? e.args.trim() : ''
+    // A bare /tree — the tree button, or the command with nothing after it —
+    // only shows or hides the pane. Open, it closes; closed, it comes back
+    // where it was, or bare with a field for the request when there is no
+    // tree yet. A new interview starts only when a request comes along
     if (!text) {
-      return { text: pack((await read($, view)).lang).noSeed }
+      const isOpen = (await $.ui.panes()).some((pane) => pane.id === PANE)
+      if (isOpen) await hide($)
+      else await show($, true)
+      return {}
     }
-    await $.ui.open({ id: PANE, title: 'tree', focus: true, rows: 22 })
-    // A new request starts a new interview: what the last one gathered —
-    // its tree, context, criteria and unsent picks — would otherwise ride
-    // into this one's prompt as standing premises
-    await update($, nodes, () => [])
-    await update($, context, () => [])
-    await update($, feeding, () => [])
-    await update($, draft, () => ({}))
-    await update($, view, (v) => ({
-      ...v,
-      layer: 0,
-      isComplete: false,
-      focusId: null,
-      stale: false,
-      applyFailed: false,
-      editing: null,
-      adding: [],
-      writing: null,
-      probing: [],
-    }))
-    await grow($, text)
+    await show($, true)
+    const budget = next && next.budget && typeof next.budget.remainingMs === 'number' ? next.budget.remainingMs : 10_000
+    const growing = start($, text)
+    let timer = null
+    await Promise.race([
+      growing,
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, Math.max(1_000, budget - 2_000))
+      }),
+    ])
+    if (timer) clearTimeout(timer)
     // The pane is the output, so nothing goes in the transcript
     return {}
   })
@@ -919,7 +1183,11 @@ export function register(on) {
     const items = await read($, context)
     const seedText = await read($, seed)
     const L = pack(state.lang)
-    const paneW = (e.props && e.props.bodyColumns) || 72
+    // Docked, the pane wears a heavy frame of its own, two columns of border
+    // and two of padding; inline, the host's border already frames it, and
+    // only the title band says what the panel is
+    const framed = !(e.props && e.props.placement === 'inline')
+    const paneW = Math.max(24, ((e.props && e.props.bodyColumns) || 72) - (framed ? 4 : 0))
     // Every section sits in a rounded card whose border and padding take four
     // columns, so everything inside is laid out to what is left
     const width = Math.max(20, paneW - 4)
@@ -978,6 +1246,38 @@ export function register(on) {
         paddingLeft: 1,
         paddingRight: 1,
         flexDirection: 'column',
+        children,
+      })
+
+    // The panel's own frame, so the pane is told from the transcript beside
+    // it at a glance: docked, a heavy border in the accent around the whole
+    // body; inline, the host's own border, which already frames it. In both,
+    // the first row is a title band — the mod's name in a block of the
+    // accent, what the panel is for beside it, the panel-wide controls at the
+    // right edge — and a rule under it, so the body starts under a line
+    const band = (right) =>
+      Box({
+        key: 'band',
+        flexDirection: 'column',
+        marginBottom: 1,
+        children: [
+          Box({
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Text({ inverse: true, bold: true, color: PANEL_COLOR, children: [' TREE '] }),
+              Text({ dimColor: true, children: [L.panelTag] }),
+              Box({ flexGrow: 1 }),
+              ...right,
+            ],
+          }),
+          Text({ color: PANEL_COLOR, dimColor: true, children: ['─'.repeat(paneW)] }),
+        ],
+      })
+    const frame = (children) =>
+      Box({
+        flexDirection: 'column',
+        ...(framed ? { borderStyle: 'bold', borderColor: PANEL_COLOR, paddingLeft: 1, paddingRight: 1 } : {}),
         children,
       })
 
@@ -1092,9 +1392,6 @@ export function register(on) {
         flexDirection: 'row',
         columnGap: 1,
         children: [
-          Text({ color: 'claude', children: ['◆'] }),
-          Text({ bold: true, children: ['tree'] }),
-          Text({ children: [' '] }),
           steps,
           Text({ bold: true, children: [state.layer ? L.step(state.layer) : L.beforeStart] }),
           Box({ flexGrow: 1 }),
@@ -1137,6 +1434,8 @@ export function register(on) {
     // Switching the pack redraws the pane, and sticks for the next session.
     // A setting touched once a session, so it sits on the hint line, not
     // among the view options
+    // Puts the pane away. /tree brings it back with a fresh interview
+    const closeButton = toggle('close', L.close, 'q', false, () => hide($))
     const langButton = toggle('lang', L.other, 'l', false, async () => {
       const chosen = state.lang === 'en' ? 'ko' : 'en'
       await update($, view, (v) => ({ ...v, lang: chosen }))
@@ -1848,15 +2147,41 @@ export function register(on) {
       flexDirection: 'row',
       columnGap: 1,
       children: [
-        Text({ dimColor: true, children: [clip(hintText, Math.max(8, paneW - 10))] }),
-        Text({ dimColor: true, children: ['·'] }),
-        langButton,
+        Text({ dimColor: true, children: [clip(hintText, paneW)] }),
       ],
     })
+    const panelBand = band([langButton, closeButton])
 
-    return Box({
-      flexDirection: 'column',
-      children: [summary, card('ctxcard', contextSection), treeSection, card('feedcard', feedSection), hint],
-    })
+    // No tree yet and none on the way: the pane came up bare, from /tree or
+    // its button. The summary stands with its grey tree and empty meter, and
+    // the request is asked for under it, in a field, instead of in a
+    // transcript line: typing it in is what starts the interview
+    if (!list.length && !state.busy && !seedText) {
+      return frame([
+          panelBand,
+          summary,
+          card('seedcard', [
+            heading('seedbar', 'tree', '', []),
+            Text({ dimColor: true, children: [clip(L.seedAsk, width)] }),
+            blank(),
+            Input({
+              key: 'seed',
+              label: L.seedLabel,
+              placeholder: L.seedPlaceholder,
+              value: '',
+              submitLabel: L.seedSubmit,
+              autoFocus: true,
+              onSubmit: async (value) => {
+                if (!value || !value.trim()) return
+                // A handler has ten seconds; the first layer can take
+                // longer, so the growing goes on behind the pane
+                await Promise.race([start($, value.trim()), new Promise((resolve) => setTimeout(resolve, 8_000))])
+              },
+            }),
+          ]),
+      ])
+    }
+
+    return frame([panelBand, summary, card('ctxcard', contextSection), treeSection, card('feedcard', feedSection), hint])
   })
 }

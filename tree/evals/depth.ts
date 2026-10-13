@@ -6,7 +6,7 @@
 // are the user's to answer — policy is asked, not settled without asking,
 // and implementation detail is never asked.
 //
-//   cd tree && bun evals/depth.ts [--runs 2] [--model opus] [--only design]
+//   cd tree && bun evals/depth.ts [--runs 2] [--model opus] [--only design] [--prompt other.md]
 //
 // The mod's tests stub the model and can't reach a process, so this sits
 // outside them: it loads hooks/register.js with the mods API stubbed out.
@@ -26,6 +26,8 @@ type Sample = {
   feeds: string[]
   // context the user already gave, read by an earlier round
   context?: string[]
+  // what the agent checking the request reported before the first layer
+  survey?: string
   // the most the tree should ever take for this ask, and for a real decision
   // the least, so cutting the prompt never cuts the questions that matter
   expect: { maxNodes: number; maxLayers: number; minNodes?: number }
@@ -109,6 +111,21 @@ const SAMPLES: Sample[] = [
     expect: { maxNodes: 4, maxLayers: 2 },
     mustNotAsk: [/채널|이메일|푸시|SMS|슬랙|즉시|모아|다이제스트|빈도|몰리|수신 ?거부 (위치|방법|화면)/],
   },
+  {
+    // A fix that points at a memo: the check found the memo half right, and
+    // what it could not settle must come back as questions, not as defaults
+    id: 'memo',
+    seed: '4번 메모 price-trend 버그 fix 일단 해당 메모가 맞는지 검증하며 틀린 부분을 찾고 물어볼 부분은 질문',
+    feeds: [],
+    survey: [
+      '확인된 사실: getPriceTrend 는 구간을 조회 구간 안 트렌드 행의 보조금 FK 에서만 만든다. updatePreOrderPolicy 는 보조금을 닫고 clone 만 하고 refresh 를 안 부른다. refresh 호출처는 updatePhonePolicy 한 곳뿐이다. 메모의 원인은 코드와 맞다. B안(updatePreOrderPolicy 끝에 refresh)은 동작 가능하다.',
+      '어긋나는 점: 1) 체크박스 한 줄이 원인 문장을 복사한 채 잘려 있고, 다른 한 줄은 오타. 2) 조회 구간에 해당 통신사 행이 하나도 없으면 시리즈 자체가 빠지는 경우가 메모에 없다. 3) B안은 앞으로의 전환만 고치고 이미 끊긴 데이터 복구 항목이 없다. 4) "응답 종료일 캡 교정 여부 결정" 은 체크됐지만 결론이 없고 코드도 그대로다. 5) B안만 있고 비교할 A안이 없다.',
+      '사용자만 답할 수 있는 점: 정책·보조금 수치를 어느 DB 에서 확인했나. 이미 끊긴 데이터를 소급 복구하나. 조회 쪽 수정과 시리즈 누락까지 이번 범위인가. 종료일 캡 결정의 결론과 이번 티켓 포함 여부. 전환일 refresh 가 가격 변동 알림 판정에 영향이 없나.',
+    ].join('\n'),
+    expect: { minNodes: 2, maxNodes: 6, maxLayers: 2 },
+    mustAsk: [/복구|소급|backfill/i, /범위|조회|A안|시리즈/],
+    mustNotAsk: [/브랜치|커밋|테스트|파일 위치|오타/],
+  },
 ]
 
 // ── load the mod's prompt code without the mods runtime ─────────────────────
@@ -126,7 +143,8 @@ async function loadMod() {
   writeFileSync(file, stubbed)
   const mod = await import(file)
   // The same file the pane reads through $.fs.read
-  return { ...mod, text: readFileSync(join(here, '../prompts/tree.md'), 'utf8') }
+  const prompt = flag('prompt', join(here, '../prompts/tree.md'))
+  return { ...mod, text: readFileSync(prompt, 'utf8') }
 }
 
 // ── one model call, isolated from settings, CLAUDE.md, tools and MCP ────────
@@ -153,7 +171,8 @@ async function ask(prompt: string, model: string) {
 
 async function interview(mod: any, sample: Sample, model: string) {
   const feeds = sample.feeds.map((text, i) => ({ id: 'f' + i, text }))
-  const items = (sample.context || []).map((text, i) => ({ id: 'c' + i, text, applied: true }))
+  const items: any[] = (sample.context || []).map((text, i) => ({ id: 'c' + i, text, applied: true }))
+  if (sample.survey) items.push({ id: 'v', text: '검증: 요구', applied: false, ref: 'survey', body: sample.survey })
   let list: any[] = []
   const perLayer: number[] = []
   const asked: string[] = []
@@ -168,6 +187,9 @@ async function interview(mod: any, sample: Sample, model: string) {
   if (!step) throw new Error(sample.id + ': layer 1 did not parse')
   let layer = 1
   const assumed: string[] = []
+  // What the model asked to read first; the eval has no agent, so it is reported
+  const reads: string[] = []
+  for (const r of step.read || []) reads.push('L1 ' + r.target)
   const open = (s: any) => s.nodes.filter((n: any) => !n.assumed)
   while (step) {
     for (const n of step.nodes.filter((n: any) => n.assumed)) assumed.push('L' + layer + ' ' + n.title + ' → ' + n.answer)
@@ -181,12 +203,13 @@ async function interview(mod: any, sample: Sample, model: string) {
     layer += 1
     step = mod.parseStep(raw, layer)
     if (!step) throw new Error(sample.id + ': layer ' + layer + ' did not parse')
+    for (const r of step.read || []) reads.push('L' + layer + ' ' + r.target)
     const struck = new Set(step.drop)
     list = list.map((n) => (struck.has(n.id) ? { ...n, zone: 'deferred', dropped: true } : n))
     step.nodes = step.nodes.filter((n: any) => !list.some((row) => row.id === n.id))
   }
   const total = perLayer.reduce((a, b) => a + b, 0)
-  return { layers: perLayer.length, perLayer, total, asked, assumed }
+  return { layers: perLayer.length, perLayer, total, asked, assumed, reads }
 }
 
 // ── run and compare ─────────────────────────────────────────────────────────
@@ -202,6 +225,8 @@ function faults(sample: Sample, r: Awaited<ReturnType<typeof interview>>) {
   if (r.total > e.maxNodes) out.push('too many questions: ' + r.total + ' > ' + e.maxNodes)
   if (r.total < (e.minNodes || 0)) out.push('too few questions: ' + r.total + ' < ' + e.minNodes)
   if (r.layers > e.maxLayers) out.push('too deep: ' + r.layers + ' > ' + e.maxLayers)
+  // None of these asks points at anything the model would have to go and read
+  if (r.reads.length) out.push('stopped to read first: ' + r.reads.join('; '))
   for (const re of sample.mustAsk || []) {
     if (!r.asked.some((q) => re.test(q))) out.push('never asked ' + re)
   }

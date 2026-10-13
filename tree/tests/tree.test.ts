@@ -69,7 +69,34 @@ const LAYER2 = JSON.stringify({
 // Nothing further to ask
 const DONE = JSON.stringify({ nodes: [], revisit: [] })
 
-function stubLayers(on: any, replies: string[]) {
+// What the agent checking the request reports before the first layer
+const SURVEY = '확인된 사실: 세션 로그는 지금 남기지 않는다'
+
+// Every request is checked by an agent before its first layer: this one
+// answers at once. A hook registers once per test, so any other agent the
+// test spawns goes to `other`, set by whichever call brings it
+type Surveyed = { other: ((e: { prompt: string }) => unknown) | null; prompts: string[] }
+const surveyed = new WeakMap<any, Surveyed>()
+function answerSurvey($: any, on: any, other?: (e: { prompt: string }) => unknown): Surveyed {
+  let slot = surveyed.get(on)
+  if (!slot) {
+    const mine: Surveyed = { other: null, prompts: [] }
+    surveyed.set(on, mine)
+    on('agent.spawn', (_: unknown, e: { description: string; prompt: string }, next: any) => {
+      if (e.description !== '요구 검증') return mine.other ? mine.other(e) : next(e)
+      mine.prompts.push(String(e.prompt))
+      void $.turn.complete({ agentId: 's0', answer: SURVEY, reason: 'answer', turnId: 't-s0', durationMs: 1, isAborted: false })
+      return { model: 'claude-test', agentId: 's0' }
+    })
+    on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
+    slot = mine
+  }
+  if (other) slot.other = other
+  return slot
+}
+
+function stubLayers($: any, on: any, replies: string[]) {
+  answerSurvey($, on)
   const seen = { calls: 0, prompts: [] as string[] }
   on('model.fork', ($: unknown, e: { prompt: string }) => {
     seen.prompts.push(String(e.prompt))
@@ -108,7 +135,7 @@ async function openTree($: any, on: any, replies: string[]) {
   servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  const seen = stubLayers(on, replies)
+  const seen = stubLayers($, on, replies)
   await $.command.run({ command: 'tree', args: SEED })
   return seen
 }
@@ -314,6 +341,7 @@ test('a call that throws still releases the pane', async ($, on) => {
   on('session.model', () => ({ value: 'claude-test' }))
   on('session.messages', () => ({ value: [] }))
   let calls = 0
+  answerSurvey($, on)
   on('model.fork', () => {
     calls += 1
     if (calls === 1) return { value: { isAnswered: true, text: LAYER1 } }
@@ -340,6 +368,7 @@ test('기다리지 않기 releases a pane that is still waiting', async ($, on) 
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
   let calls = 0
+  answerSurvey($, on)
   on('model.fork', async () => {
     calls += 1
     if (calls === 1) return { value: { isAnswered: true, text: LAYER1 } }
@@ -465,11 +494,13 @@ test('context, questions and feeding stack top to bottom as three sections', asy
   }>
   const at = (key: string) => cards.findIndex((r) => r.props && r.props.key === key)
 
-  // The summary card opens the pane, then context, questions and feeding
-  expect(at('summary')).toBe(0)
-  expect(at('ctxcard')).toBe(1)
-  expect(at('treecard')).toBe(2)
-  expect(at('feedcard')).toBe(3)
+  // The title band opens the pane, then the summary card, context,
+  // questions and feeding
+  expect(at('band')).toBe(0)
+  expect(at('summary')).toBe(1)
+  expect(at('ctxcard')).toBe(2)
+  expect(at('treecard')).toBe(3)
+  expect(at('feedcard')).toBe(4)
   // Each section is a rounded card, and each card opens on its own heading
   for (const [cardKey, headKey] of [
     ['ctxcard', 'ctxbar'],
@@ -481,6 +512,31 @@ test('context, questions and feeding stack top to bottom as three sections', asy
     expect((one.children || [])[0].props?.key).toBe(headKey)
   }
   await ui.unmount()
+})
+
+test('the pane wears a title band, and docked, a heavy frame of its own', async ($, on) => {
+  await openTree($, on, [LAYER1])
+
+  // Inline, the host's border frames the pane: the root carries none, and
+  // the band is its first child, naming the mod in the accent with the
+  // panel's own controls at its right
+  const inline = await $.ui.mount(PANE)
+  const root = (await inline.find({ type: 'Box' })) as { props?: { borderStyle?: string }; children?: Array<{ props?: { key?: string } }> }
+  expect(root.props?.borderStyle).toBeUndefined()
+  expect((root.children || [])[0].props?.key).toBe('band')
+  expect(await inline.find({ type: 'Text', text: ' TREE ' })).toMatchObject({ props: { inverse: true, color: 'claude' } })
+  expect(await inline.find({ key: 'close' })).toBeDefined()
+  expect(await inline.find({ key: 'lang' })).toBeDefined()
+  await inline.unmount()
+
+  // Docked, the pane draws the frame: a bold border in the accent, and the
+  // body laid out four columns narrower for it
+  const docked = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'dock' } })
+  const frame = (await docked.find({ type: 'Box' })) as { props?: { borderStyle?: string; borderColor?: string } }
+  expect(frame.props?.borderStyle).toBe('bold')
+  expect(frame.props?.borderColor).toBe('claude')
+  expect(await docked.find({ key: 'summary' })).toMatchObject({ props: { width: 68 } })
+  await docked.unmount()
 })
 
 test('all three sections are titled, and extended context is gone', async ($, on) => {
@@ -594,6 +650,7 @@ test('with nothing to fork yet, it still builds the layer from the messages', as
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   // Before the main thread has answered once, a fork has nothing to ride on
+  answerSurvey($, on)
   on('model.fork', () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
   on('session.model', () => ({ value: 'claude-test' }))
   on('session.messages', () => ({
@@ -613,11 +670,128 @@ test('with nothing to fork yet, it still builds the layer from the messages', as
   await ui.unmount()
 })
 
+test('a bare /tree with no tree yet opens a bare pane that asks for the request', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  const open = new Set<string>()
+  on('ui.open', ($, e) => {
+    open.add(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => ({ value: [...open].map((id) => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })) }))
+  on('session.messages', () => ({ value: [{ role: 'user', text: '직전에 보낸 말', toolUses: [] }] }))
+  const seen = stubLayers($, on, [LAYER1])
+
+  const result = await $.command.run({ command: 'tree', args: '' })
+
+  // The pane opens, and the last prompt is not taken as a seed: nothing grows
+  expect(result.text).toBeUndefined()
+  expect(open.has('tree')).toBe(true)
+  expect(seen.calls).toBe(0)
+
+  // The pane holds a field for the request, and nothing of a tree
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'seed' })).toMatchObject({ props: { autoFocus: true } })
+  expect(await ui.find({ key: 'node-n1' })).toBeUndefined()
+  expect(await ui.find({ key: 'submit' })).toBeUndefined()
+
+  // Typing the request in is what starts the interview
+  await ui.input({ key: 'seed', text: SEED })
+  expect(seen.calls).toBe(1)
+  expect(seen.prompts[0]).toContain(SEED)
+  expect(await ui.find({ key: 'seed' })).toBeUndefined()
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane comes up with the session, and stays away once the person put it away', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  const open = new Set<string>()
+  const opens: Array<{ focus?: boolean }> = []
+  on('ui.open', ($, e) => {
+    open.add(e.id)
+    opens.push({ focus: e.focus })
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    open.delete(e.id)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [...open].map((id) => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })) }))
+  mock.store(on)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+
+  // A session's start, the mod turned on, a reload: the pane is there, and
+  // the keyboard stays at the prompt
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(open.has('tree')).toBe(true)
+  expect(opens[0].focus).not.toBe(true)
+
+  // A reload with the pane still up opens nothing twice
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(opens.length).toBe(1)
+
+  // Put away with its own close button, a reload leaves it away
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'close' })
+  expect(open.has('tree')).toBe(false)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(open.has('tree')).toBe(false)
+
+  // A bare /tree brings it back. The mod turned off drops the pane without
+  // a word to its hooks; turned on again, the start brings the pane back
+  await $.command.run({ command: 'tree', args: '' })
+  expect(open.has('tree')).toBe(true)
+  open.delete('tree')
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  expect(open.has('tree')).toBe(true)
+
+  // Nobody at the prompt: no pane
+  open.clear()
+  await $.session.start({ cwd: '/tmp', surface: null, isInteractive: false })
+  expect(open.has('tree')).toBe(false)
+  await ui.unmount()
+})
+
+test('a bare /tree hides the open pane and brings it back, tree intact', async ($, on) => {
+  const open = new Set<string>()
+  on('ui.open', ($, e) => {
+    open.add(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    open.delete(e.id)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [...open].map((id) => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })) }))
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  const seen = stubLayers($, on, [LAYER1])
+  await $.command.run({ command: 'tree', args: SEED })
+  expect(open.has('tree')).toBe(true)
+
+  // Open: /tree closes it, and the interview is not restarted
+  await $.command.run({ command: 'tree', args: '' })
+  expect(open.has('tree')).toBe(false)
+  expect(seen.prompts.length).toBe(1)
+
+  // Closed: /tree opens it again on the same tree, still without a new call
+  await $.command.run({ command: 'tree', args: '' })
+  expect(open.has('tree')).toBe(true)
+  expect(seen.prompts.length).toBe(1)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  expect(await ui.find({ key: 'node-n2' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a model that answers nothing says why on the pane', async ($, on) => {
   servePrompts(on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.log', () => ({ value: undefined }))
+  answerSurvey($, on)
   on('model.fork', () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
   on('session.model', () => ({ value: 'claude-test' }))
   on('session.messages', () => ({ value: [] }))
@@ -692,6 +866,7 @@ test('the wait turns a spinner where the questions will appear', async ($, on) =
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
   let calls = 0
+  answerSurvey($, on)
   on('model.fork', async () => {
     calls += 1
     if (calls === 1) return { value: { isAnswered: true, text: LAYER1 } }
@@ -1031,15 +1206,16 @@ test('the request sits in the context, folded once the first layer read it', asy
   await openTree($, on, [LAYER1])
 
   const ui = await $.ui.mount(PANE)
-  // Applied right away, so it folds into the count with nothing to apply;
-  // the count line is itself the toggle
-  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 1개' })).toMatchObject({ props: { plain: true } })
+  // Applied right away, with the check it was given, so both fold into the
+  // count with nothing to apply; the count line is itself the toggle
+  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 2개' })).toMatchObject({ props: { plain: true } })
   expect(await ui.find({ key: 'ctxrow-seed' })).toBeUndefined()
   expect(await ui.find({ key: 'apply' })).toBeUndefined()
 
   await ui.press({ key: 'ctx-fold' })
   expect(await ui.find({ type: 'Text', text: SEED })).toBeDefined()
-  expect(await ui.find({ key: 'ctx-fold', text: '▾ 반영됨 1개' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '검증: 요구' })).toBeDefined()
+  expect(await ui.find({ key: 'ctx-fold', text: '▾ 반영됨 2개' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1059,8 +1235,8 @@ test('an added item is pending until applied, then folds with the rest', async (
   // The whole context went in: the request and the item
   expect(seen.prompts[1]).toContain('## 요구\n\n' + SEED)
   expect(seen.prompts[1]).toContain('레거시 DB 는 못 건드린다')
-  // Both now applied, folded into one line, and nothing left to apply
-  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 2개/ })).toBeDefined()
+  // All now applied — request, its check, the item — folded into one line
+  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 3개/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '레거시 DB 는 못 건드린다' })).toBeUndefined()
   expect(await ui.find({ key: 'apply' })).toBeUndefined()
   await ui.unmount()
@@ -1082,8 +1258,8 @@ test('editing an applied item sends it back to pending, out of the fold', async 
   expect(field).toMatchObject({ props: { value: '토스만 쓴다' } })
   await ui.input({ key: editKey.replace('edit-ctx-', 'ctx-edit-'), text: '토스와 KCP 를 쓴다' })
 
-  // Only the request is left in the fold; the edited item is pending again
-  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 1개/ })).toBeDefined()
+  // Only the request and its check are left in the fold; the edited item is pending again
+  expect(await ui.find({ key: 'ctx-fold', text: /반영됨 2개/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '토스와 KCP 를 쓴다' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '미반영' })).toBeDefined()
   expect(await ui.find({ key: 'apply' })).toBeDefined()
@@ -1172,6 +1348,7 @@ test('nothing in the context can be touched while an apply is out', async ($, on
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
   let calls = 0
+  answerSurvey($, on)
   on('model.fork', async () => {
     calls += 1
     if (calls === 1) return { value: { isAnswered: true, text: LAYER1 } }
@@ -1207,7 +1384,7 @@ test('the fold stays shut once the next round reads a pending item', async ($, o
   await ui.press({ key: 'auto' })
   await ui.press({ key: 'submit' })
   // The round read it, so it is applied and the fold closed over it again
-  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 2개' })).toBeDefined()
+  expect(await ui.find({ key: 'ctx-fold', text: '▸ 반영됨 3개' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '토스만 쓴다' })).toBeUndefined()
   await ui.unmount()
 })
@@ -1242,6 +1419,7 @@ test('a prompt is tree.md with the state stacked below it', async ($, on) => {
 
 test('a prompt file that will not load says so instead of hanging', async ($, on) => {
   // No answer for fs.read at all: the read rejects, as a missing file would
+  answerSurvey($, on)
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   await $.command.run({ command: 'tree', args: SEED })
@@ -1663,7 +1841,7 @@ test('write-in and look-in-the-code share one line, with letters for keys one at
 })
 
 test('a decision under research says so on its title, and names itself in the notice', async ($, on) => {
-  on('agent.spawn', () => ({ model: 'claude-test', agentId: 'a1' }))
+  answerSurvey($, on, () => ({ model: 'claude-test', agentId: 'a1' }))
   await openTree($, on, [LAYER1])
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'probe-n1' })
@@ -1808,6 +1986,7 @@ test('stopping the wait on the first layer offers try again, and the late reply 
   on('ui.open', () => ({ value: { isPlaced: true } }))
   let release: (() => void) | null = null
   let calls = 0
+  answerSurvey($, on)
   on('model.fork', async () => {
     calls += 1
     // The first call hangs until the test lets it go; the retry answers at once
@@ -1835,5 +2014,107 @@ test('stopping the wait on the first layer offers try again, and the late reply 
   await ui.press({ key: 'retry' })
   expect(await ui.find({ key: 'node-n1' })).toBeDefined()
   expect(calls).toBe(2)
+  await ui.unmount()
+})
+
+// A link added to the context: the model building a layer has no tools, so
+// what it points at is read by an agent when the context is applied
+const LINK = 'https://example.atlassian.net/browse/MOB-4986'
+const ISSUE = ['### ' + LINK, '제목: 로그인 세션 만료 정책', '요구사항: 세션 만료 시 재로그인 없이 토큰을 갱신한다', '수용 기준: 만료 후 첫 요청이 401 없이 성공한다'].join('\n')
+
+function spawnReader($: any, on: any, agentId = 'r1') {
+  const spawned: string[] = []
+  answerSurvey($, on, (e) => {
+    spawned.push(String(e.prompt))
+    return { model: 'claude-test', agentId }
+  })
+  return spawned
+}
+
+function turnOf(agentId: string, answer: string, reason: 'answer' | 'error' = 'answer') {
+  return { agentId, answer, reason, turnId: 't-' + agentId, durationMs: 1, isAborted: false }
+}
+
+// A request goes as written, link and all, first to the agent that checks
+// it and then to the model with that check beside it
+const SENTENCE = '세션 만료 정책 정리해야 하는데 ' + LINK + ' 이거 보고 기존 토큰 갱신 코드도 서칭해서 맞춰줘'
+
+test('a request is checked by an agent as written, and the first layer stands on that check', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const check = answerSurvey($, on)
+  const seen = stubLayers($, on, [LAYER1])
+
+  await $.command.run({ command: 'tree', args: SENTENCE })
+  const ui = await $.ui.mount(PANE)
+  expect(check.prompts.length).toBe(1)
+  expect(check.prompts[0]).toContain(SENTENCE)
+  expect(seen.calls).toBe(1)
+  expect(seen.prompts[0]).toContain('## 요구\n\n' + SENTENCE)
+  expect(seen.prompts[0]).toContain('검증: 요구\n')
+  expect(seen.prompts[0]).toContain(SURVEY)
+  // The link in the request is the check's to read, not a separate fetch
+  expect(seen.prompts[0]).not.toContain('읽음:')
+  expect(await ui.find({ key: 'node-n1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a link added to the context is read when the context is applied', async ($, on) => {
+  const clock = mock.clock(on)
+  const spawned = spawnReader($, on, 'r2')
+  const seen = await openTree($, on, [LAYER1, LAYER1])
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '참고: ' + LINK })
+
+  const apply = ui.press({ key: 'apply' })
+  await clock.settle()
+  await $.turn.complete(turnOf('r2', ISSUE))
+  await apply
+  expect(spawned[0]).toContain(LINK)
+  // The rebuilt layer was asked for with both the row and what its link said
+  expect(seen.prompts[1]).toContain('[미반영] 참고: ' + LINK)
+  expect(seen.prompts[1]).toContain('[미반영] 읽음: ' + LINK)
+  expect(seen.prompts[1]).toContain('제목: 로그인 세션 만료 정책')
+  // A second apply reads nothing again: the link is known
+  await ui.press({ key: 'add-ctx' })
+  await ui.input({ key: 'ctx', text: '하나 더' })
+  await ui.press({ key: 'apply' })
+  expect(spawned.length).toBe(1)
+  await ui.unmount()
+})
+
+test('the hint line has a close button that puts the pane away', async ($, on) => {
+  const closed: string[] = []
+  on('ui.close', ($: unknown, e: { id: string }) => {
+    closed.push(e.id)
+    return { value: undefined }
+  })
+  await openTree($, on, [LAYER1])
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'close' })).toBeDefined()
+  await ui.press({ key: 'close' })
+  expect(closed).toEqual(['tree'])
+  await ui.unmount()
+})
+
+test('a request that cannot be checked builds no tree, and says why', async ($, on) => {
+  servePrompts(on)
+  on('command.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ deny: 'agents are off' }))
+  let calls = 0
+  on('model.fork', () => {
+    calls += 1
+    return { value: { isAnswered: true, text: LAYER1 } }
+  })
+
+  await $.command.run({ command: 'tree', args: SEED })
+  const ui = await $.ui.mount(PANE)
+  // No layer is guessed without the check behind it
+  expect(calls).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /요구를 검증하지 못했습니다 — .*agents are off/ })).toBeDefined()
+  expect(await ui.find({ key: 'node-n1' })).toBeUndefined()
   await ui.unmount()
 })

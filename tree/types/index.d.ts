@@ -44,6 +44,10 @@ declare module 'claude-code' {
     text: string
     /** a round has folded it into the tree; editing it puts it back to pending */
     applied: boolean
+    /** the link this row was read off, when an agent fetched it */
+    ref?: string
+    /** what the link said, laid under the row in the prompt and the handoff */
+    body?: string
   }
 
   interface TreeView {
@@ -79,6 +83,8 @@ declare module 'claude-code' {
     writing: string | null
     /** the decisions a research agent has been sent at */
     probing: string[]
+    /** the person put the pane away; it stays away through reloads until a bare /tree */
+    hidden: boolean
   }
 
   interface PluginState {

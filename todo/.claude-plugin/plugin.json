@@ -1,0 +1,7 @@
+{
+  "name": "todo",
+  "version": "0.1.0",
+  "description": "Shows TODO.md as a live tree pane in Claude Code: toggle, add, edit and delete items in place, written straight back to the file",
+  "author": { "name": "Jongmin Yoon" },
+  "types": "./types/index.d.ts"
+}

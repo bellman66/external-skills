@@ -1,0 +1,7 @@
+{
+  "name": "mods",
+  "version": "0.1.0",
+  "description": "A control band above the prompt listing every loaded mod's slash command as a button; press one to run it",
+  "author": { "name": "Jongmin Yoon" },
+  "types": "./types/index.d.ts"
+}
